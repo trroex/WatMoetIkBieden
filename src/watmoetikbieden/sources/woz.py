@@ -1,119 +1,130 @@
 """
 WOZ (Wet Waardering Onroerende Zaken) property valuations.
 
-Primary source: WOZ Waardeloket (www.wozwaardeloket.nl)
-  An undocumented internal API used by the Dutch developer community.
-  Flow:
-    1. POST /session/start  → receive session-id + lb-sticky cookie
-    2. GET  /wozwaarde/nummeraanduiding/{nummeraanduiding_id}  → WOZ history
+Source: Kadaster LVWOZ API (api.kadaster.nl)
+  Official public API — no auth, no session, no cookies required.
+  Rate limit: 5000 requests/day (logged on every response).
 
-CBS Statline fallback: NOT YET IMPLEMENTED.
-  CBS OData $filter is broken server-side on all tested dataset fields
-  (same pattern as the PDOK WFS CQL_FILTER bug). The kerncijfers dataset
-  interleaves municipalities with wijken/buurten, requiring ~3000+ row
-  fetches to reach late-alphabet municipalities. We need a municipality-only
-  WOZ dataset with working filtering before this is viable.
-
-Rate limiting: the waardeloket asks for at most 1 request/second.
+Caching: responses are written to .cache/woz/{nummeraanduiding_id}.json
+  and reused for 30 days to stay well within the daily rate limit.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 
 from watmoetikbieden.models import WozResult, WozWaarde
 
-_LOKET_BASE = "https://www.wozwaardeloket.nl/wozwaardeloket-api/v1"
+_API_BASE = "https://api.kadaster.nl/lvwoz/wozwaardeloket-api/v1"
+_CACHE_DIR = Path(".cache/woz")
+_CACHE_TTL_DAYS = 30
 
-_last_loket_call: float = 0.0
-_loket_lock = asyncio.Lock()
+_ratelimit_remaining: int | None = None
 
 
 def _diag(msg: str) -> None:
-    """Print a diagnostic line to stderr — always visible, never suppressed."""
     print(f"[WOZ] {msg}", file=sys.stderr, flush=True)
 
 
-async def _loket_wait() -> None:
-    global _last_loket_call
-    async with _loket_lock:
-        gap = time.monotonic() - _last_loket_call
-        if gap < 1.0:
-            await asyncio.sleep(1.0 - gap)
-        _last_loket_call = time.monotonic()
+def _cache_path(nummeraanduiding_id: str) -> Path:
+    return _CACHE_DIR / f"{nummeraanduiding_id}.json"
 
 
-_LOKET_HOME = "https://www.wozwaardeloket.nl"
-
-# Browser-like headers – the site uses a WAF that rejects bare httpx user-agents
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "nl-NL,nl;q=0.9",
-    "Referer": "https://www.wozwaardeloket.nl/",
-    "Origin": "https://www.wozwaardeloket.nl",
-}
+def _load_cache(nummeraanduiding_id: str) -> dict | None:
+    p = _cache_path(nummeraanduiding_id)
+    if not p.exists():
+        return None
+    age_days = (time.time() - p.stat().st_mtime) / 86400
+    if age_days > _CACHE_TTL_DAYS:
+        return None
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
-async def _seed_cookies(client: httpx.AsyncClient) -> None:
-    """
-    GET the main page to seed load-balancer cookies into the client jar.
+def _save_cache(nummeraanduiding_id: str, data: dict) -> None:
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _cache_path(nummeraanduiding_id).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
-    The /session/start POST endpoint returns 405 (removed from the API).
-    The ADC_CONN / ADC_REQ cookies set by the home page are sufficient
-    for the data endpoint to respond with JSON.
-    """
-    await _loket_wait()
-    r = await client.get(_LOKET_HOME, headers=_HEADERS, follow_redirects=True)
-    _diag(f"GET home → HTTP {r.status_code}, cookies: {list(r.cookies.keys())}")
-    r.raise_for_status()
+
+def _log_ratelimit(headers: httpx.Headers) -> None:
+    global _ratelimit_remaining
+    day_limit = headers.get("Kadaster-Ratelimit-Daylimit")
+    remaining = headers.get("Kadaster-Ratelimit-Daylimit-Remaining")
+    if day_limit or remaining:
+        _diag(f"rate-limit: {remaining}/{day_limit} remaining today")
+    if remaining is not None:
+        try:
+            _ratelimit_remaining = int(remaining)
+        except ValueError:
+            pass
+
+
+def _parse_response(raw: dict) -> WozResult:
+    woz_obj = raw.get("wozObject") or {}
+    grondoppervlakte = woz_obj.get("grondoppervlakte")
+    wozobjectnummer = woz_obj.get("wozobjectnummer")
+    gemeentecode = woz_obj.get("gemeentecode")
+
+    waarden_raw = raw.get("wozWaarden") or []
+    waarden = [
+        WozWaarde(
+            peildatum=r.get("peildatum", ""),
+            vastgesteldeWaarde=r.get("vastgesteldeWaarde"),
+        )
+        for r in waarden_raw
+        if r.get("peildatum")
+    ]
+
+    return WozResult(
+        waarden=waarden,
+        source="kadaster_lvwoz",
+        grondoppervlakte=grondoppervlakte,
+        wozobjectnummer=wozobjectnummer,
+        gemeentecode_woz=gemeentecode,
+    )
 
 
 async def fetch_woz_waardeloket(
     nummeraanduiding_id: str,
     _unused_client: httpx.AsyncClient,
-) -> tuple[WozResult | None, list | dict]:
+) -> tuple[WozResult | None, dict]:
     """
     Fetch all registered WOZ values for a nummeraanduiding ID.
     Returns (WozResult, raw) or (None, {}) on any failure.
-    Diagnostic output always goes to stderr.
-
-    Uses its own AsyncClient so WAF cookies don't bleed into the
-    shared BAG/EP-Online client jar.
     """
+    global _ratelimit_remaining
+
+    cached = _load_cache(nummeraanduiding_id)
+    if cached is not None:
+        _diag("cache hit")
+        return _parse_response(cached), cached
+
+    _diag("cache miss → fetching")
+
+    if _ratelimit_remaining is not None and _ratelimit_remaining < 100:
+        _diag(f"WARNING: only {_ratelimit_remaining} requests remaining today — skipping WOZ call")
+        return None, {}
+
+    url = f"{_API_BASE}/wozwaarde/nummeraanduiding/{nummeraanduiding_id}"
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as c:
         try:
-            await _seed_cookies(c)
+            resp = await c.get(url)
         except Exception as exc:
-            _diag(f"cookie seed exception: {type(exc).__name__}: {exc}")
+            _diag(f"fetch exception: {type(exc).__name__}: {exc}")
             return None, {}
 
-        await _loket_wait()
-        try:
-            resp = await c.get(
-                f"{_LOKET_BASE}/wozwaarde/nummeraanduiding/{nummeraanduiding_id}",
-                headers=_HEADERS,
-            )
-        except Exception as exc:
-            _diag(f"data fetch exception: {type(exc).__name__}: {exc}")
-            return None, {}
-
-        _diag(
-            f"data fetch → HTTP {resp.status_code}, "
-            f"content-type: {resp.headers.get('content-type', '?')}"
-        )
+        _log_ratelimit(resp.headers)
+        _diag(f"HTTP {resp.status_code}, content-type: {resp.headers.get('content-type', '?')}")
 
         if resp.status_code in (404, 204):
-            _diag("no WOZ data registered for this address")
+            _diag("no WOZ data registered for this nummeraanduiding")
             return None, {}
 
         if resp.status_code != 200:
@@ -126,19 +137,5 @@ async def fetch_woz_waardeloket(
             _diag(f"response is not JSON; body starts: {resp.text[:200]!r}")
             return None, {}
 
-        records: list[dict] = raw if isinstance(raw, list) else raw.get("wozWaardes", [])
-        _diag(f"records in response: {len(records)}")
-
-        if not records:
-            return None, raw
-
-        waarden = [
-            WozWaarde(
-                peildatum=r.get("peildatum", ""),
-                vastgesteldeWaarde=r.get("vastgesteldeWaarde"),
-            )
-            for r in records
-            if r.get("peildatum")
-        ]
-
-        return WozResult(waarden=waarden, source="wozwaardeloket"), raw
+    _save_cache(nummeraanduiding_id, raw)
+    return _parse_response(raw), raw
