@@ -160,8 +160,9 @@ class LeefbarometerResult(BaseModel):
     bu_code: str
     bu_naam: str
     scores_2024: dict[str, float | None] = Field(default_factory=dict)
-    lbm_history: list[dict] = Field(default_factory=list)  # [{jaar, lbm}, ...]
-    national_mean_2024: float
+    lbm_history: list[dict] = Field(default_factory=list)  # [{jaar, lbm, fys, onv, soc, vrz, won}, ...]
+    national_mean_2024: float                              # lbm only (backward compat)
+    national_means_2024: dict[str, float | None] = Field(default_factory=dict)  # all 6 dims
     score_vs_national: float
     source: str = "leefbaarometer_2024"
     lookup_method: str = "buurtcode"  # or "coordinates"

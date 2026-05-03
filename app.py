@@ -388,12 +388,70 @@ W_final = W_type × perceel_factor
                 st.dataframe(df_lbm, use_container_width=True, hide_index=True)
 
                 if lbm.lbm_history:
-                    st.markdown("**Historiek**")
-                    df_lhist = pd.DataFrame(
-                        [(r["jaar"], r["lbm"]) for r in lbm.lbm_history if r["lbm"] is not None],
-                        columns=["Jaar", "LBM-score"],
-                    ).sort_values("Jaar")
-                    st.line_chart(df_lhist.set_index("Jaar"), y="LBM-score", use_container_width=True)
+                    import plotly.graph_objects as go
+
+                    _DIM_LABELS = {
+                        "lbm": "Totaal leefbaarheid",
+                        "fys": "Fysieke omgeving",
+                        "onv": "Onveiligheid",
+                        "soc": "Sociaal",
+                        "vrz": "Voorzieningen",
+                        "won": "Woningen",
+                    }
+                    national_means = lbm.national_means_2024
+
+                    st.markdown("**Historiek per dimensie**")
+                    dims = list(_DIM_LABELS.keys())
+                    # Render 2 charts per row
+                    for row_start in range(0, len(dims), 2):
+                        c_left, c_right = st.columns(2)
+                        for col_idx, dim in enumerate(dims[row_start : row_start + 2]):
+                            col_widget = c_left if col_idx == 0 else c_right
+                            with col_widget:
+                                pts = [
+                                    (int(r["jaar"]), r[dim])
+                                    for r in lbm.lbm_history
+                                    if r.get(dim) is not None
+                                ]
+                                if not pts:
+                                    st.caption(f"_{_DIM_LABELS[dim]}: geen data_")
+                                    continue
+                                pts.sort()
+                                years  = [p[0] for p in pts]
+                                values = [p[1] for p in pts]
+
+                                fig = go.Figure()
+                                fig.add_trace(go.Scatter(
+                                    x=years, y=values,
+                                    mode="lines+markers",
+                                    name="Buurt",
+                                    line=dict(color="#1f77b4", width=2),
+                                    marker=dict(size=5),
+                                ))
+
+                                nat = national_means.get(dim)
+                                if nat is not None:
+                                    fig.add_hline(
+                                        y=nat,
+                                        line_dash="dash",
+                                        line_color="#aaaaaa",
+                                        annotation_text=f"NL {nat:.3f}",
+                                        annotation_position="bottom right",
+                                        annotation_font_size=10,
+                                    )
+
+                                fig.update_layout(
+                                    title=dict(
+                                        text=_DIM_LABELS[dim],
+                                        font=dict(size=13),
+                                    ),
+                                    height=220,
+                                    margin=dict(l=10, r=10, t=35, b=10),
+                                    showlegend=False,
+                                    xaxis=dict(tickformat="d"),
+                                    yaxis=dict(autorange=True),
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("Geen Leefbaarometer-data beschikbaar.")
 

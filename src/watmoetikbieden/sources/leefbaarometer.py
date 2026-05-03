@@ -170,7 +170,8 @@ class LeefbarometerLookup:
         self._df = None        # full multi-year scores DataFrame
         self._df24 = None      # 2024 slice
         self._gdf = None       # buurt polygons in RD New (EPSG:28992)
-        self._national_mean: float | None = None
+        self._national_mean: float | None = None          # lbm only (backward compat)
+        self._national_means: dict[str, float | None] = {}  # all 6 dimensions
         self._transformer = None  # WGS84 → RD New
 
     # ── loading ──────────────────────────────────────────────────────────────
@@ -185,7 +186,14 @@ class LeefbarometerLookup:
 
         self._df = _read_scores(scores_path)
         self._df24 = self._df[self._df["jaar"] == 2024].copy()
-        self._national_mean = round(float(self._df24["lbm"].mean()), 6)
+
+        # Compute national means for all 6 dimensions (NaN rows excluded)
+        self._national_means = {
+            col: round(float(self._df24[col].mean(skipna=True)), 6)
+            if col in self._df24.columns else None
+            for col in _SCORE_COLS
+        }
+        self._national_mean = self._national_means.get("lbm")
 
         _diag(f"loading buurt GeoPackage … ({len(self._df24)} buurten in 2024)")
         self._gdf = gpd.read_file(geom_path)  # stays in EPSG:28992
@@ -221,15 +229,21 @@ class LeefbarometerLookup:
         scores_2024 = {col: _safe_float(s[col]) for col in _SCORE_COLS}
 
         history_rows = self._df[self._df["bu_code"] == bu_code].sort_values("jaar")
+        # Each history row carries all 6 dimension scores (None when absent)
+        available_cols = [c for c in _SCORE_COLS if c in history_rows.columns]
         lbm_history = [
-            {"jaar": int(r["jaar"]), "lbm": _safe_float(r["lbm"])}
+            {
+                "jaar": int(r["jaar"]),
+                **{col: _safe_float(r[col]) for col in available_cols},
+            }
             for _, r in history_rows.iterrows()
         ]
 
         lbm_val = scores_2024["lbm"]
+        lbm_nat = self._national_mean
         vs_national = (
-            round(lbm_val - self._national_mean, 6)
-            if lbm_val is not None
+            round(lbm_val - lbm_nat, 6)
+            if (lbm_val is not None and lbm_nat is not None)
             else 0.0
         )
 
@@ -238,7 +252,8 @@ class LeefbarometerLookup:
             bu_naam=bu_naam,
             scores_2024=scores_2024,
             lbm_history=lbm_history,
-            national_mean_2024=self._national_mean,
+            national_mean_2024=lbm_nat if lbm_nat is not None else 0.0,
+            national_means_2024=self._national_means,
             score_vs_national=vs_national,
             lookup_method=lookup_method,
         )

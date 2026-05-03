@@ -1,6 +1,8 @@
 # WatMoetIkBieden
 One-stop Dutch housing market bid price estimator – free public data only.
 
+> **Open tasks & planned improvements:** see [`TODO.md`](TODO.md)
+
 ## Quick start
 
 ```powershell
