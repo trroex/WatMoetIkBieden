@@ -4,7 +4,7 @@
 
 ## 1. Regional OLS price relatives for WOZ estimator
 
-**Status:** planned, not started  
+**Status:** ✅ implemented (2026-05)  
 **Priority:** high – current national relatives cause ~17% underestimation in rural/affluent areas  
 **Context:** see conversation history for full design discussion
 

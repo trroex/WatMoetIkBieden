@@ -107,8 +107,14 @@ def show_results(data, user_input: dict) -> None:
     elif w and w.grondoppervlakte:
         perceel_m2 = w.grondoppervlakte
 
-    # Compute WOZ estimate (needs CBS data + user house type + perceel size)
-    woz_est = woz_estimate(cbs, user_input.get("house_type", "Anders / onbekend"), perceel_m2) if cbs else None
+    # Compute WOZ estimate (needs CBS data + user house type + perceel size + province)
+    province = a.provincienaam if a else None
+    woz_est = woz_estimate(
+        cbs,
+        user_input.get("house_type", "Anders / onbekend"),
+        perceel_m2,
+        province=province,
+    ) if cbs else None
 
     st.divider()
 
@@ -161,6 +167,7 @@ def show_results(data, user_input: dict) -> None:
                 delta_color=delta_col or "normal",
                 help=(
                     f"Methode: {woz_est.method} {confidence_icon}\n"
+                    f"Prijsrelatieven: {woz_est.relatives_source}\n"
                     f"Type relatief: {woz_est.type_relative:.3f}\n"
                     f"Buurtdekking: {woz_est.coverage_pct:.0f}%\n"
                     f"Buurt gem. WOZ: {_fmt_eur(woz_est.source_gem_woz_eur)}"
@@ -283,9 +290,11 @@ def show_results(data, user_input: dict) -> None:
                 from watmoetikbieden.woz_estimator import (
                     NATIONAL_PRICES_2024, RELATIVES, PERCEEL_PARAMS,
                     MIN_PERCEEL_FACTOR, MAX_PERCEEL_FACTOR,
+                    _get_regional_relatives,
                 )
 
                 st.markdown("#### Stap 1 – Type-aanpassing op buurtgemiddelde")
+                st.caption(f"Prijsrelatieven: **{woz_est.relatives_source}**")
                 st.markdown(f"""
 ```
 W_type = gem_woz_buurt × r_type / Σ_t(pct_t × r_t)
@@ -293,32 +302,54 @@ W_type = gem_woz_buurt × r_type / Σ_t(pct_t × r_t)
        = {_fmt_eur(woz_est.step1_value)}
 ```
 - **Buurt gem. WOZ:** {_fmt_eur(woz_est.source_gem_woz_eur)} (bron: CBS 85984NED, in €1000 opgeslagen)
-- **r_type ({user_input.get('house_type','?')}):** {woz_est.type_relative:.4f} (nationaal relatief t.o.v. gemiddelde)
+- **r_type ({user_input.get('house_type','?')}):** {woz_est.type_relative:.4f} (relatief t.o.v. gemiddelde)
 - **Σ(pct·r) buurtsamenstelling:** {woz_est.composition_weight or '–'} (gewogen relatief op basis van buurtmix)
 - **Buurtdekking:** {woz_est.coverage_pct:.0f}% van woningtypes bekend uit CBS
 """)
 
-                st.markdown("**Nationale prijsrelatieven (CBS 83910NED, 2023)**")
-                rel_rows = [
-                    (
-                        lbl,
-                        f"€ {NATIONAL_PRICES_2024[code]:,}".replace(",", "."),
-                        f"{RELATIVES[code]:.4f}",
-                        "← dit adres" if code == woz_est.house_type_code else "",
-                    )
-                    for lbl, code in [
-                        ("Tussenwoning", "ZW25805"),
-                        ("Hoekwoning", "ZW25806"),
-                        ("Twee-onder-één-kap", "ZW10300"),
-                        ("Vrijstaande woning", "ZW10320"),
-                        ("Appartement", "ZW25810"),
-                        ("Nationaal gemiddelde", "T001100"),
-                    ]
+                # Relatives table: regional β values when available, else national
+                is_regional = woz_est.relatives_source.startswith("regional")
+                prov_rels = _get_regional_relatives(province) if (is_regional and province) else None
+
+                type_rows_def = [
+                    ("Tussenwoning",       "ZW25805"),
+                    ("Hoekwoning",         "ZW25806"),
+                    ("Twee-onder-één-kap", "ZW10300"),
+                    ("Vrijstaande woning", "ZW10320"),
+                    ("Appartement",        "ZW25810"),
                 ]
-                st.dataframe(
-                    pd.DataFrame(rel_rows, columns=["Type", "Gem. verkoopprijs 2023", "Relatief", ""]),
-                    use_container_width=True, hide_index=True,
-                )
+
+                if prov_rels:
+                    st.markdown(f"**Provinciale prijsrelatieven via OLS ({woz_est.relatives_source})**")
+                    rel_rows = [
+                        (
+                            lbl,
+                            f"€ {prov_rels[code] * 1000:,.0f}".replace(",", ".") if code in prov_rels else "–",
+                            f"{prov_rels[code]:.4f}" if code in prov_rels else "–",
+                            "← dit adres" if code == woz_est.house_type_code else "",
+                        )
+                        for lbl, code in type_rows_def
+                    ]
+                    st.dataframe(
+                        pd.DataFrame(rel_rows, columns=["Type", "Geschatte gem. WOZ (€)", "β (€1k)", ""]),
+                        use_container_width=True, hide_index=True,
+                    )
+                    st.caption("β-waarden uit gewogen OLS over alle buurten in deze provincie (CBS 85984NED).")
+                else:
+                    st.markdown("**Nationale prijsrelatieven (CBS 85791NED, 2024)**")
+                    rel_rows = [
+                        (
+                            lbl,
+                            f"€ {NATIONAL_PRICES_2024[code]:,}".replace(",", ".") if code in NATIONAL_PRICES_2024 else "–",
+                            f"{RELATIVES[code]:.4f}" if code in RELATIVES else "–",
+                            "← dit adres" if code == woz_est.house_type_code else "",
+                        )
+                        for lbl, code in type_rows_def + [("Nationaal gemiddelde", "T001100")]
+                    ]
+                    st.dataframe(
+                        pd.DataFrame(rel_rows, columns=["Type", "Gem. verkoopprijs 2024", "Relatief", ""]),
+                        use_container_width=True, hide_index=True,
+                    )
 
                 st.markdown("#### Stap 2 – Perceelgrootte-aanpassing")
                 if woz_est.perceel_applied:

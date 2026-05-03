@@ -1,8 +1,13 @@
 """
-CBS Kerncijfers Wijken en Buurten 2024 (85984NED).
+CBS Kerncijfers Wijken en Buurten 2025 (86165NED).
 
 Fetches neighbourhood demographics via the CBS OData v1 API.
 Falls back from buurt → wijk → gemeente if a level has no data.
+
+Dataset year alignment:
+  86165NED (KWB 2025) contains gem_woz_waarde with peildatum 2025-01-01,
+  consistent with the Kadaster LVWOZ values we compare against.
+  Published 2026-03-31.
 
 Caching: .cache/cbs/{code}.json with a 7-day TTL.
 """
@@ -18,7 +23,7 @@ import httpx
 
 from watmoetikbieden.models import CbsDemographicsResult
 
-_BASE = "https://datasets.cbs.nl/odata/v1/CBS/85984NED"
+_BASE = "https://datasets.cbs.nl/odata/v1/CBS/86165NED"
 _CACHE_DIR = Path(".cache/cbs")
 _CACHE_TTL_DAYS = 7
 

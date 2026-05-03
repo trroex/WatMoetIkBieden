@@ -232,6 +232,7 @@ class WozEstimate:
     confidence: str                   # "high" | "medium" | "low" | "unavailable"
     method: str                       # human-readable description of what was done
     house_type_code: str | None       # CBS type code used
+    relatives_source: str = "national"  # "national" | "regional (Noord-Brabant)" etc.
 
     @property
     def label(self) -> str:
@@ -249,6 +250,35 @@ class WozEstimate:
         if self.estimated_value is None or real_woz <= 0:
             return None
         return (self.estimated_value - real_woz) / real_woz * 100
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REGIONAL RELATIVES LOADER  (lazy, module-level cache)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_regional_cache: dict | None = None
+_regional_loaded: bool = False
+
+
+def _get_regional_relatives(province: str) -> dict[str, float] | None:
+    """
+    Return province-level β relatives for *province*, or None if unavailable.
+
+    The full dict is loaded once per process and cached in _regional_cache.
+    A failed load (e.g. CBS unreachable) is cached as an empty dict so
+    subsequent calls don't retry on every request.
+    """
+    global _regional_cache, _regional_loaded
+    if not _regional_loaded:
+        try:
+            from watmoetikbieden.regional_relatives import load_regional_relatives
+            _regional_cache = load_regional_relatives()
+        except Exception as exc:
+            import sys
+            print(f"[WOZ] regional relatives unavailable: {exc}", file=sys.stderr)
+            _regional_cache = {}
+        _regional_loaded = True
+    return (_regional_cache or {}).get(province)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -295,16 +325,21 @@ def estimate(
     cbs: "CbsDemographicsResult",
     house_type_label: str,
     perceel_m2: int | None = None,
+    province: str | None = None,
 ) -> WozEstimate:
     """
     Estimate the WOZ value for a specific house type at a given address.
 
     Parameters
     ----------
-    cbs             CBS buurt demographics (must contain gem_woz_waarde and pct_* fields).
+    cbs               CBS buurt demographics (must contain gem_woz_waarde and pct_* fields).
     house_type_label  UI label string, e.g. "Tussenwoning" or "Vrijstaande woning".
-    perceel_m2      Actual cadastral plot area in m² (from BRK or WOZ grondoppervlakte).
-                    Pass None to skip the perceel adjustment.
+    perceel_m2        Actual cadastral plot area in m² (from BRK or WOZ grondoppervlakte).
+                      Pass None to skip the perceel adjustment.
+    province          Province name as returned by BAG Locatieserver (e.g. "Noord-Brabant").
+                      When provided and regional relatives are available, they replace the
+                      national relatives in Step 1.  Falls back to national if the province
+                      is not covered (< 30 buurten) or CBS data is unavailable.
 
     Returns
     -------
@@ -313,8 +348,53 @@ def estimate(
     """
     type_code = HOUSE_TYPE_TO_CBS.get(house_type_label)
 
-    # ── guard: need buurt average WOZ as base ────────────────────────────────
+    # ── read base value early (needed for both guard and regional check) ──────
     gem_woz_k = cbs.gem_woz_waarde
+
+    # ── resolve relatives (regional if available and beneficial, else national) ──
+    #
+    # Regional OLS gives province-specific β values (in €1 000) derived from
+    # weighted OLS across all buurten in the province.  The formula:
+    #   W_type = gem_woz × β_type / Σ(pct_t × β_t)
+    # is a ratio so units cancel.  However, the OLS β_vrijstaand is inflated by
+    # rural buurten with 60-70% vrijstaand and very high WOZ values.  For a
+    # *mixed* buurt (e.g. 20 % vrijstaand), this inflates the denominator and
+    # produces a lower estimate than national — the opposite of the intended fix.
+    #
+    # "Take-max" rule: use regional only when its Step-1 estimate is strictly
+    # higher than the national estimate.  Regional can only *help* (correct
+    # underestimation in affluent buurten); when it gives a lower value it
+    # means the vrijstaand inflation is dominant and national is safer.
+    prov_rels: dict[str, float] | None = None
+    relatives_source = "national"
+
+    if province and type_code and gem_woz_k and gem_woz_k > 0:
+        _prov_rels_candidate = _get_regional_relatives(province)
+        if _prov_rels_candidate and type_code in _prov_rels_candidate:
+            _gem_eur = round(gem_woz_k * 1000)
+            # Compute step1 under both relative sets and prefer the higher one.
+            def _quick_step1(rels_dict: dict) -> int | None:
+                r_t = rels_dict.get(type_code)
+                if r_t is None:
+                    return None
+                w = sum(
+                    (getattr(cbs, f, None) or 0) / 100.0 * (rels_dict.get(tc) or 0)
+                    for f, tc in _PCT_FIELD_TO_TYPE.items()
+                )
+                return round(_gem_eur * r_t / w) if w > 0.01 else None
+
+            _s1_nat = _quick_step1(RELATIVES)
+            _s1_reg = _quick_step1(_prov_rels_candidate)
+            if _s1_reg and _s1_nat and _s1_reg > _s1_nat:
+                prov_rels = _prov_rels_candidate
+                relatives_source = f"regional ({province})"
+            # else: regional ≤ national → vrijstaand inflation dominant → keep national
+
+    # Active relatives dict: β values in €1 000 (regional) or dimensionless
+    # factors (national).  The Step-1 formula is a ratio, so units cancel.
+    rels = prov_rels if prov_rels else RELATIVES
+
+    # ── guard: need buurt average WOZ as base ────────────────────────────────
     if not gem_woz_k or gem_woz_k <= 0:
         return WozEstimate(
             estimated_value=None,
@@ -331,6 +411,7 @@ def estimate(
             confidence="unavailable",
             method="unavailable – geen CBS gem_woz_waarde voor deze buurt",
             house_type_code=type_code,
+            relatives_source=relatives_source,
         )
 
     gem_woz_eur = round(gem_woz_k * 1000)
@@ -352,9 +433,10 @@ def estimate(
             confidence="low",
             method="buurt_average_only – woningtype onbekend, geen type-aanpassing",
             house_type_code=None,
+            relatives_source=relatives_source,
         )
 
-    r_target = RELATIVES[type_code]
+    r_target = rels[type_code]
 
     # ── Step 1: composition-adjusted type estimate ────────────────────────────
     # Compute Σ_t (pct_t/100 × r_t) using the buurt's woningtype composition.
@@ -362,20 +444,20 @@ def estimate(
     coverage = 0.0
     for field, tcode in _PCT_FIELD_TO_TYPE.items():
         pct = getattr(cbs, field, None)
-        if pct is not None:
-            weighted_r += (pct / 100.0) * RELATIVES[tcode]
+        r_t = rels.get(tcode)
+        if pct is not None and r_t is not None:
+            weighted_r += (pct / 100.0) * r_t
             coverage += pct
 
     confidence = "high" if coverage >= 90 else "medium" if coverage >= 70 else "low"
 
     if weighted_r > 0.01:
         step1 = round(gem_woz_eur * r_target / weighted_r)
-        step1_method = "composition_adjusted"
+        step1_method = f"composition_adjusted ({relatives_source})"
     else:
-        # Fallback: no composition data, apply national relative directly.
-        # This ignores buurt mix but is better than no adjustment at all.
-        step1 = round(gem_woz_eur * r_target)
-        step1_method = "national_relative_fallback"
+        # Fallback: no composition data, apply relative directly.
+        step1 = round(gem_woz_eur * r_target / (r_target or 1.0))   # simplifies to gem_woz_eur
+        step1_method = f"national_relative_fallback"
         confidence = "low"
 
     # ── Step 2: perceel-size adjustment ──────────────────────────────────────
@@ -414,4 +496,5 @@ def estimate(
         confidence=confidence,
         method=method,
         house_type_code=type_code,
+        relatives_source=relatives_source,
     )
