@@ -14,11 +14,11 @@ Write-Host "Creating virtual environment..." -ForegroundColor Cyan
 Invoke-Expression "$PY -m venv .venv"
 
 Write-Host "Activating venv and installing dependencies..." -ForegroundColor Cyan
-& .\.venv\Scripts\pip install -e ".[dev]" 2>$null
-& .\.venv\Scripts\pip install -e .
+& .\.venv\Scripts\pip install -e ".[ui]"
 
 Write-Host ""
-Write-Host "Done! Run the tool with:" -ForegroundColor Green
+Write-Host "Done! Run the web interface with:" -ForegroundColor Green
+Write-Host '  .\.venv\Scripts\streamlit run app.py'
+Write-Host ""
+Write-Host "Or use the CLI:" -ForegroundColor Green
 Write-Host '  .\.venv\Scripts\fetch-address "Keizersgracht 123, 1015 CJ Amsterdam"'
-Write-Host "Or via the scripts runner:"
-Write-Host '  .\.venv\Scripts\python scripts\fetch_address.py "Keizersgracht 123, 1015 CJ Amsterdam"'

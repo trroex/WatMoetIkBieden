@@ -204,6 +204,14 @@ class CbsDemographicsResult(BaseModel):
     koopwoningen_pct: float | None = None        # already % in CBS source
     huurwoningen_pct: float | None = None
 
+    # Woningtype percentages (ZW* measures from CBS 85984NED)
+    pct_eengezinswoning: float | None = None     # all single-family homes combined
+    pct_tussenwoning: float | None = None        # mid-terrace
+    pct_hoekwoning: float | None = None          # corner terrace
+    pct_twee_onder_een_kap: float | None = None  # semi-detached
+    pct_vrijstaand: float | None = None          # detached
+    pct_meergezinswoning: float | None = None    # apartment / multi-family
+
     gem_inkomen_inwoner: float | None = None     # in €1 000
     stedelijkheid: int | None = None             # 1 (very urban) – 5 (rural)
     oad: float | None = None                     # addresses per km²

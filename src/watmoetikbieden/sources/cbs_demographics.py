@@ -35,6 +35,13 @@ _MEASURES: dict[str, str] = {
     "M000114":   "gem_huishoudensgrootte",
     "1014800":   "koopwoningen_pct",     # already a % in source
     "1014850_2": "huurwoningen_pct",     # already a %
+    # Woningtype percentages
+    "ZW10290":   "pct_eengezinswoning",
+    "ZW25805":   "pct_tussenwoning",
+    "ZW25806":   "pct_hoekwoning",
+    "ZW10300":   "pct_twee_onder_een_kap",
+    "ZW10320":   "pct_vrijstaand",
+    "ZW10340":   "pct_meergezinswoning",
     "M000224":   "gem_inkomen_inwoner",  # in €1 000
     "ST0001":    "stedelijkheid",        # 1 (very urban) – 5 (rural)
     "ST0003":    "oad",                  # addresses per km²
@@ -126,6 +133,12 @@ def _extract(raw: dict, buurtcode: str, level: str) -> CbsDemographicsResult:
         gem_huishoudensgrootte=get("M000114"),
         koopwoningen_pct=get("1014800"),
         huurwoningen_pct=get("1014850_2"),
+        pct_eengezinswoning=get("ZW10290"),
+        pct_tussenwoning=get("ZW25805"),
+        pct_hoekwoning=get("ZW25806"),
+        pct_twee_onder_een_kap=get("ZW10300"),
+        pct_vrijstaand=get("ZW10320"),
+        pct_meergezinswoning=get("ZW10340"),
         gem_inkomen_inwoner=get("M000224"),   # €1 000 units
         stedelijkheid=int(get("ST0001")) if get("ST0001") else None,
         oad=get("ST0003"),
