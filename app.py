@@ -87,6 +87,7 @@ def run_fetch(address: str):
 
 def show_results(data, user_input: dict) -> None:
     from watmoetikbieden.models import AddressData
+    from watmoetikbieden.woz_estimator import estimate as woz_estimate
     assert isinstance(data, AddressData)
 
     a = data.bag_address
@@ -98,6 +99,16 @@ def show_results(data, user_input: dict) -> None:
     lbm = data.leefbaarometer
     cbs = data.cbs_demographics
     mr = w.meest_recent if w else None
+
+    # Perceel size: prefer BRK cadastral area, fall back to WOZ grondoppervlakte
+    perceel_m2: int | None = None
+    if b and b.kadastraleGrootteWaarde:
+        perceel_m2 = b.kadastraleGrootteWaarde
+    elif w and w.grondoppervlakte:
+        perceel_m2 = w.grondoppervlakte
+
+    # Compute WOZ estimate (needs CBS data + user house type + perceel size)
+    woz_est = woz_estimate(cbs, user_input.get("house_type", "Anders / onbekend"), perceel_m2) if cbs else None
 
     st.divider()
 
@@ -125,28 +136,50 @@ def show_results(data, user_input: dict) -> None:
         st.markdown("##### Kerncijfers")
         c1, c2, c3, c4, c5 = st.columns(5)
 
+        # Real WOZ (Kadaster) — validation target
+        real_woz = mr.vastgesteldeWaarde if mr else None
         c1.metric(
-            "WOZ-waarde (meest recent)",
-            _fmt_eur(mr.vastgesteldeWaarde) if mr else "–",
-            help=f"Peildatum: {mr.peildatum}" if mr else None,
+            "WOZ-waarde (Kadaster)",
+            _fmt_eur(real_woz),
+            help=f"Peildatum: {mr.peildatum}" if mr else "Niet beschikbaar",
         )
-        c2.metric(
+
+        # Estimated WOZ (our model)
+        if woz_est and woz_est.estimated_value:
+            delta_str = None
+            delta_col = None
+            if real_woz:
+                d = woz_est.validation_delta_pct(real_woz)
+                if d is not None:
+                    delta_str = f"{d:+.1f}% t.o.v. Kadaster"
+                    delta_col = "normal" if abs(d) < 10 else "off"
+            confidence_icon = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(woz_est.confidence, "⚪")
+            c2.metric(
+                f"Geschatte WOZ ({user_input.get('house_type','?')})",
+                _fmt_eur(woz_est.estimated_value),
+                delta=delta_str,
+                delta_color=delta_col or "normal",
+                help=(
+                    f"Methode: {woz_est.method} {confidence_icon}\n"
+                    f"Type relatief: {woz_est.type_relative:.3f}\n"
+                    f"Buurtdekking: {woz_est.coverage_pct:.0f}%\n"
+                    f"Buurt gem. WOZ: {_fmt_eur(woz_est.source_gem_woz_eur)}"
+                ),
+            )
+        else:
+            c2.metric("Geschatte WOZ", "–", help="CBS buurtdata of woningtype ontbreekt")
+
+        c3.metric(
             "Vloeroppervlak",
             f"{v.oppervlakte} m²" if (v and v.oppervlakte) else "–",
         )
-        c3.metric(
+        c4.metric(
             "Bouwjaar",
             str(v.bouwjaar) if (v and v.bouwjaar) else (str(p.bouwjaar) if (p and p.bouwjaar) else "–"),
         )
-        c4.metric(
-            "Energielabel (EP-Online)",
-            e.Pand_energieklasse if e else ("Geen certificaat" if data.ep_no_label else "–"),
-        )
         c5.metric(
-            "Perceeloppervlak",
-            f"{b.kadastraleGrootteWaarde} m²" if (b and b.kadastraleGrootteWaarde) else
-            (f"{w.grondoppervlakte} m²" if (w and w.grondoppervlakte) else "–"),
-            help="BRK kadaster" if (b and b.kadastraleGrootteWaarde) else ("WOZ-object" if (w and w.grondoppervlakte) else None),
+            "Energielabel (EP-Online)",
+            e.Pand_energieklasse if e else ("Geen cert." if data.ep_no_label else "–"),
         )
 
         # User inputs recap
@@ -214,6 +247,122 @@ def show_results(data, user_input: dict) -> None:
                     st.line_chart(df_buurt_woz.set_index("Jaar"), y="Gem. WOZ buurt (€)", use_container_width=True)
         else:
             st.info("Geen WOZ-data beschikbaar voor dit adres.")
+
+        # ── model validation ──────────────────────────────────────────────────
+        if woz_est and woz_est.estimated_value:
+            st.divider()
+            st.markdown("##### 🔬 Modelvalidatie: Geschatte WOZ vs. Kadaster")
+
+            vc1, vc2, vc3, vc4, vc5 = st.columns(5)
+            vc1.metric("Geschatte WOZ", _fmt_eur(woz_est.estimated_value))
+            vc2.metric(
+                "w.v. stap 1 (type)",
+                _fmt_eur(woz_est.step1_value),
+                help="Buurtgemiddelde gecorrigeerd voor woningtype, vóór perceelcorrectie",
+            )
+            vc3.metric(
+                "Perceelfactor",
+                f"{woz_est.perceel_factor:.3f}" if woz_est.perceel_applied else "–",
+                help=f"{woz_est.perceel_m2} m² vs. ref {woz_est.perceel_reference_m2} m², γ={woz_est.perceel_gamma}"
+                     if woz_est.perceel_applied else "Geen perceeldata of niet van toepassing",
+            )
+            vc4.metric("Kadaster WOZ", _fmt_eur(real_woz))
+
+            if real_woz:
+                delta = woz_est.validation_delta_pct(real_woz)
+                vc5.metric(
+                    "Afwijking",
+                    f"{delta:+.1f}%" if delta is not None else "–",
+                    delta=f"{delta:+.1f}%" if delta is not None else None,
+                    delta_color="normal" if (delta is not None and abs(delta) < 10) else "off",
+                    help="(Geschat − Kadaster) / Kadaster × 100",
+                )
+
+            # Model details
+            with st.expander("Modeldetails"):
+                from watmoetikbieden.woz_estimator import (
+                    NATIONAL_PRICES_2024, RELATIVES, PERCEEL_PARAMS,
+                    MIN_PERCEEL_FACTOR, MAX_PERCEEL_FACTOR,
+                )
+
+                st.markdown("#### Stap 1 – Type-aanpassing op buurtgemiddelde")
+                st.markdown(f"""
+```
+W_type = gem_woz_buurt × r_type / Σ_t(pct_t × r_t)
+       = {_fmt_eur(woz_est.source_gem_woz_eur)} × {woz_est.type_relative:.4f} / {woz_est.composition_weight or '?'}
+       = {_fmt_eur(woz_est.step1_value)}
+```
+- **Buurt gem. WOZ:** {_fmt_eur(woz_est.source_gem_woz_eur)} (bron: CBS 85984NED, in €1000 opgeslagen)
+- **r_type ({user_input.get('house_type','?')}):** {woz_est.type_relative:.4f} (nationaal relatief t.o.v. gemiddelde)
+- **Σ(pct·r) buurtsamenstelling:** {woz_est.composition_weight or '–'} (gewogen relatief op basis van buurtmix)
+- **Buurtdekking:** {woz_est.coverage_pct:.0f}% van woningtypes bekend uit CBS
+""")
+
+                st.markdown("**Nationale prijsrelatieven (CBS 83910NED, 2023)**")
+                rel_rows = [
+                    (
+                        lbl,
+                        f"€ {NATIONAL_PRICES_2024[code]:,}".replace(",", "."),
+                        f"{RELATIVES[code]:.4f}",
+                        "← dit adres" if code == woz_est.house_type_code else "",
+                    )
+                    for lbl, code in [
+                        ("Tussenwoning", "ZW25805"),
+                        ("Hoekwoning", "ZW25806"),
+                        ("Twee-onder-één-kap", "ZW10300"),
+                        ("Vrijstaande woning", "ZW10320"),
+                        ("Appartement", "ZW25810"),
+                        ("Nationaal gemiddelde", "T001100"),
+                    ]
+                ]
+                st.dataframe(
+                    pd.DataFrame(rel_rows, columns=["Type", "Gem. verkoopprijs 2023", "Relatief", ""]),
+                    use_container_width=True, hide_index=True,
+                )
+
+                st.markdown("#### Stap 2 – Perceelgrootte-aanpassing")
+                if woz_est.perceel_applied:
+                    st.markdown(f"""
+```
+perceel_factor = (actual_m2 / reference_m2) ^ γ
+               = ({woz_est.perceel_m2} / {woz_est.perceel_reference_m2}) ^ {woz_est.perceel_gamma}
+               = {woz_est.perceel_factor:.4f}   (geclamped op [{MIN_PERCEEL_FACTOR}, {MAX_PERCEEL_FACTOR}])
+
+W_final = W_type × perceel_factor
+        = {_fmt_eur(woz_est.step1_value)} × {woz_est.perceel_factor:.4f}
+        = {_fmt_eur(woz_est.estimated_value)}
+```
+""")
+                else:
+                    st.info(
+                        f"Perceelaanpassing overgeslagen — {woz_est.method.split('overgeslagen: ')[-1] if 'overgeslagen' in woz_est.method else 'niet van toepassing'}. "
+                        f"Eindwaarde = stap 1 waarde = {_fmt_eur(woz_est.step1_value)}"
+                    )
+
+                st.markdown("**Perceelparameters per woningtype**")
+                perc_rows = [
+                    (
+                        lbl,
+                        f"{PERCEEL_PARAMS[code]['reference_m2']} m²" if PERCEEL_PARAMS[code]["reference_m2"] else "–",
+                        str(PERCEEL_PARAMS[code]["gamma"]),
+                        "← dit adres" if code == woz_est.house_type_code else "",
+                    )
+                    for lbl, code in [
+                        ("Tussenwoning", "ZW25805"),
+                        ("Hoekwoning", "ZW25806"),
+                        ("Twee-onder-één-kap", "ZW10300"),
+                        ("Vrijstaande woning", "ZW10320"),
+                        ("Appartement", "ZW25810"),
+                    ]
+                ]
+                st.dataframe(
+                    pd.DataFrame(perc_rows, columns=["Type", "Referentie perceel", "γ (elasticiteit)", ""]),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(
+                    "γ = prijselasticiteit t.o.v. perceelgrootte (log-log). "
+                    "Pas aan in `woz_estimator.py` → PERCEEL_PARAMS."
+                )
 
     # ── tab 3: buurt & leefbaarheid ───────────────────────────────────────────
     with tab_buurt:
