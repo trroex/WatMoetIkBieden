@@ -133,8 +133,8 @@ def show_results(data, user_input: dict) -> None:
         st.error("Adres niet gevonden in de BAG. Controleer de invoer.")
         return
 
-    tab_samen, tab_woz, tab_buurt, tab_bouw, tab_raw = st.tabs(
-        ["📊 Samenvatting", "💰 WOZ-waarde", "🏘️ Buurt & leefbaarheid", "🏗️ Bouwtechnisch", "🔍 Ruwe data"]
+    tab_samen, tab_woz, tab_buurt, tab_omgeving, tab_bouw, tab_raw = st.tabs(
+        ["📊 Samenvatting", "💰 WOZ-waarde", "🏘️ Buurt & leefbaarheid", "🏫 Omgeving", "🏗️ Bouwtechnisch", "🔍 Ruwe data"]
     )
 
     # ── tab 1: samenvatting ───────────────────────────────────────────────────
@@ -627,7 +627,102 @@ W_final = W_type × perceel_factor
             else:
                 st.info("Geen CBS-data beschikbaar.")
 
-    # ── tab 4: bouwtechnisch ──────────────────────────────────────────────────
+    # ── tab 4: omgeving – scholen & kinderopvang ─────────────────────────────
+    with tab_omgeving:
+        from watmoetikbieden.sources.nearby_schools import (
+            fetch_nearby_schools, enrich_with_duo_ratings,
+            parse_bag_centroide, DEFAULT_RADIUS_M,
+        )
+
+        coords = parse_bag_centroide(a.centroide_ll) if a else None
+
+        if not coords:
+            st.info("Geen coördinaten beschikbaar voor dit adres — kan omgeving niet ophalen.")
+        else:
+            lat, lon = coords
+            radius_m = DEFAULT_RADIUS_M
+            gemeente_naam = a.gemeentenaam or ""
+
+            st.markdown(f"##### Scholen & kinderopvang binnen {radius_m // 1000} km")
+            st.caption(f"Bron: OpenStreetMap / Overpass API · DUO oordelen t/m 2018 · straal {radius_m:,} m · looptijd op basis van 5 km/u")
+
+            # Fetch from Overpass (7-day file cache — fast after first call)
+            schools: list = []
+            try:
+                with st.spinner("Scholen ophalen via OpenStreetMap…"):
+                    schools = fetch_nearby_schools(lat, lon, radius_m)
+            except Exception as exc:
+                st.error(f"Kon scholen niet ophalen: {exc}")
+
+            if schools:
+                # Enrich with DUO ratings (module-level cache — fast after first load)
+                try:
+                    with st.spinner("DUO schooloordelen koppelen…"):
+                        schools = enrich_with_duo_ratings(schools, gemeente_naam)
+                except Exception as exc:
+                    st.warning(f"DUO-oordelen niet beschikbaar: {exc}")
+
+                # Group by category, descending from higher to lower education
+                CATEGORY_ORDER = [
+                    "Universiteit / Hogeschool",
+                    "MBO / Vakschool",
+                    "Middelbare school",
+                    "Basisschool",
+                    "Kindcentrum / IKC",
+                    "Kinderopvang / peuterspeelzaal",
+                    "Speciaal onderwijs",
+                    "School (onbekend type)",
+                    "Onderwijsinstelling",
+                ]
+                # Categories for which DUO PO/VO enrichment is attempted
+                DUO_CATEGORIES = {"Basisschool", "Kindcentrum / IKC", "Middelbare school", "School (onbekend type)"}
+
+                from collections import defaultdict
+                by_cat: dict[str, list] = defaultdict(list)
+                for s in schools:
+                    by_cat[s.category].append(s)
+
+                # Render present categories in order, then any unlisted ones
+                present_ordered = [c for c in CATEGORY_ORDER if c in by_cat]
+                present_ordered += [c for c in by_cat if c not in CATEGORY_ORDER]
+
+                # Always use the same fixed column set so all tables share identical widths
+                COL_CFG = {
+                    "Naam":             st.column_config.TextColumn("Naam",             width=200),
+                    "Afstand":          st.column_config.TextColumn("Afstand",          width=80),
+                    "Looptijd":         st.column_config.TextColumn("Looptijd",         width=80),
+                    "Oordeel (t/m 2018)": st.column_config.TextColumn("Oordeel (t/m 2018)", width=160),
+                    "Denominatie":      st.column_config.TextColumn("Denominatie",      width=160),
+                    "Beheerder":        st.column_config.TextColumn("Beheerder",        width=160),
+                    "Website":          st.column_config.TextColumn("Website",          width=160),
+                }
+                ALL_COLS = list(COL_CFG.keys())
+
+                for cat in present_ordered:
+                    items = by_cat[cat]
+                    st.markdown(f"**{cat}** ({len(items)})")
+                    show_duo = cat in DUO_CATEGORIES
+                    rows = []
+                    for s in items:
+                        rows.append({
+                            "Naam":               s.name,
+                            "Afstand":            f"{s.distance_m} m",
+                            "Looptijd":           f"~{s.walk_min} min",
+                            "Oordeel (t/m 2018)": (s.rating_label or "–") if show_duo else "–",
+                            "Denominatie":        (s.denominatie or "–") if show_duo else "–",
+                            "Beheerder":          s.operator or "–",
+                            "Website":            s.website or "–",
+                        })
+                    st.dataframe(
+                        pd.DataFrame(rows, columns=ALL_COLS),
+                        column_config=COL_CFG,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+            else:
+                st.info(f"Geen scholen gevonden binnen {radius_m:,} m.")
+
+    # ── tab 5: bouwtechnisch ──────────────────────────────────────────────────
     with tab_bouw:
         c1, c2 = st.columns(2)
         with c1:
