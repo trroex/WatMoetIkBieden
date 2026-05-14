@@ -110,4 +110,26 @@ After implementing, re-run against the known test case:
 
 ---
 
-## 2. *(next task here)*
+## 2. Replace hardcoded modal income with CBS API
+
+**Status:** ⏳ pending  
+**Priority:** medium – hardcoded table works for now; CBS API preferred for yearly updates
+
+### Problem
+
+`market_indicators.py` uses a hardcoded `MODAL_INCOME` dict (2006–2025).  
+CBS publishes the modal inkomen annually via StatLine / OData.
+
+### Solution
+
+Fetch from CBS OData.  Likely table: **83981NED** ("Inkomen van personen; inkomensverdeling")  
+or the Nibud/CBS "modaal loon" series.  Verify table ID and measure code before implementing.
+
+### Files to modify
+
+```
+src/watmoetikbieden/market_indicators.py
+    - Replace MODAL_INCOME dict with _fetch_modal_income() that calls CBS OData
+    - Cache result in .cache/market/ with 365-day TTL
+    - Keep hardcoded dict as fallback if CBS is unreachable
+```

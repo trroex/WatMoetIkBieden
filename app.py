@@ -140,7 +140,7 @@ def show_results(data, user_input: dict) -> None:
     # ── tab 1: samenvatting ───────────────────────────────────────────────────
     with tab_samen:
         st.markdown("##### Kerncijfers")
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
 
         # Real WOZ (Kadaster) — validation target
         real_woz = mr.vastgesteldeWaarde if mr else None
@@ -181,10 +181,15 @@ def show_results(data, user_input: dict) -> None:
             f"{v.oppervlakte} m²" if (v and v.oppervlakte) else "–",
         )
         c4.metric(
+            "Perceeloppervlak",
+            f"{perceel_m2} m²" if perceel_m2 else "–",
+            help="Bron: BRK kadastrale grootte" if (b and b.kadastraleGrootteWaarde) else "Bron: WOZ grondoppervlakte",
+        )
+        c5.metric(
             "Bouwjaar",
             str(v.bouwjaar) if (v and v.bouwjaar) else (str(p.bouwjaar) if (p and p.bouwjaar) else "–"),
         )
-        c5.metric(
+        c6.metric(
             "Energielabel (EP-Online)",
             e.Pand_energieklasse if e else ("Geen cert." if data.ep_no_label else "–"),
         )
@@ -228,32 +233,131 @@ def show_results(data, user_input: dict) -> None:
 
     # ── tab 2: woz ───────────────────────────────────────────────────────────
     with tab_woz:
+        import plotly.graph_objects as go
+        from watmoetikbieden.market_indicators import lending_capacity_series, WOONQUOTE, TERM_YEARS
+
+        # ── fetch all series first so we can combine into one chart ───────────
+        # House-specific WOZ history
+        woz_pts: list[tuple[int, int]] = []
         if w and w.history:
-            st.markdown("##### WOZ-waarde historiek")
+            woz_pts = sorted((h["jaar"], h["waarde"]) for h in w.history if h["waarde"])
             if w.is_approximation:
                 st.warning("⚠️ Gemeente-gemiddelde gebruikt als benadering (geen individuele waarde beschikbaar)")
 
-            df_woz = pd.DataFrame(
-                [(h["jaar"], h["waarde"]) for h in w.history if h["waarde"]],
-                columns=["Jaar", "WOZ-waarde (€)"],
-            ).sort_values("Jaar")
-            st.line_chart(df_woz.set_index("Jaar"), y="WOZ-waarde (€)", use_container_width=True)
+        # Buurt average WOZ series
+        buurt_series: dict | None = None
+        if a and a.buurtcode:
+            with st.spinner("CBS gem. WOZ buurt ophalen…"):
+                from watmoetikbieden.sources.cbs_woz_longitudinal import fetch_gem_woz_series
+                wijkcode = a.wijkcode or None
+                gemeentecode = f"GM{a.gemeentecode}" if a.gemeentecode else None
+                buurt_series = fetch_gem_woz_series(a.buurtcode, wijkcode, gemeentecode)
 
-            # cbs gem woz history
-            if a and a.buurtcode:
-                with st.spinner("CBS gem. WOZ buurt ophalen…"):
-                    from watmoetikbieden.sources.cbs_woz_longitudinal import fetch_gem_woz_series
-                    wijkcode = a.wijkcode or None
-                    gemeentecode = f"GM{a.gemeentecode}" if a.gemeentecode else None
-                    buurt_series = fetch_gem_woz_series(a.buurtcode, wijkcode, gemeentecode)
-                if buurt_series:
-                    df_buurt_woz = pd.DataFrame(
-                        sorted(buurt_series.items()), columns=["Jaar", "Gem. WOZ buurt (€)"]
-                    )
-                    st.markdown("##### Gem. WOZ-waarde buurt (CBS)")
-                    st.line_chart(df_buurt_woz.set_index("Jaar"), y="Gem. WOZ buurt (€)", use_container_width=True)
-        else:
+        # Lending capacity series
+        lc_rows = lending_capacity_series()
+
+        if woz_pts or buurt_series or lc_rows:
+            st.markdown("##### WOZ-waarde & maximale hypotheek bij modaal inkomen")
+
+            fig_woz = go.Figure()
+
+            if woz_pts:
+                years_woz, vals_woz = zip(*woz_pts)
+                fig_woz.add_trace(go.Scatter(
+                    x=years_woz, y=vals_woz,
+                    mode="lines+markers",
+                    name="WOZ dit adres",
+                    line=dict(color="#1f77b4", width=2),
+                    marker=dict(size=5),
+                    hovertemplate="%{x}: € %{y:,.0f}<extra>WOZ dit adres</extra>",
+                ))
+
+            if buurt_series:
+                buurt_pts = sorted(buurt_series.items())
+                years_b, vals_b = zip(*buurt_pts)
+                fig_woz.add_trace(go.Scatter(
+                    x=years_b, y=vals_b,
+                    mode="lines+markers",
+                    name="Gem. WOZ buurt",
+                    line=dict(color="#ff7f0e", width=2, dash="dot"),
+                    marker=dict(size=4),
+                    hovertemplate="%{x}: € %{y:,.0f}<extra>Gem. WOZ buurt</extra>",
+                ))
+
+            if lc_rows:
+                df_lc = pd.DataFrame(lc_rows)
+                fig_woz.add_trace(go.Scatter(
+                    x=df_lc["year"], y=df_lc["max_mortgage"],
+                    mode="lines+markers",
+                    name="Max. hypotheek (modaal)",
+                    line=dict(color="#2ca02c", width=2, dash="dash"),
+                    marker=dict(size=4),
+                    hovertemplate="%{x}: € %{y:,.0f}<extra>Max. hypotheek modaal</extra>",
+                ))
+
+            fig_woz.update_layout(
+                yaxis=dict(title="Waarde (€)", tickformat=",.0f", autorange=True),
+                xaxis=dict(title="Jaar", tickformat="d"),
+                height=380,
+                margin=dict(l=10, r=10, t=10, b=10),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig_woz, use_container_width=True)
+
+            if lc_rows:
+                st.caption(
+                    f"Max. hypotheek: annuïteit {TERM_YEARS} jr, woonquote {WOONQUOTE*100:.0f}% bruto, "
+                    "DNB-rente jaargemiddelde. Modaal inkomen: CBS/hardcoded."
+                )
+        elif w and not w.history:
             st.info("Geen WOZ-data beschikbaar voor dit adres.")
+
+        # ── lending capacity detail expander ──────────────────────────────────
+        if lc_rows:
+            with st.expander("Leencapaciteit – onderliggende data"):
+                df_lc_exp = pd.DataFrame(lc_rows)
+                mc1, mc2 = st.columns(2)
+                with mc1:
+                    st.markdown("**Rente (jaargemiddelde DNB, %)**")
+                    fig_r = go.Figure(go.Scatter(
+                        x=df_lc_exp["year"], y=df_lc_exp["rate_totaal"],
+                        mode="lines+markers",
+                        line=dict(color="#d62728", width=2),
+                        marker=dict(size=4),
+                        hovertemplate="%{x}: %{y:.2f}%<extra></extra>",
+                    ))
+                    fig_r.update_layout(
+                        height=200, margin=dict(l=10, r=10, t=10, b=10),
+                        yaxis=dict(autorange=True),
+                        xaxis=dict(tickformat="d"),
+                        showlegend=False,
+                    )
+                    st.plotly_chart(fig_r, use_container_width=True)
+                with mc2:
+                    st.markdown("**Modaal inkomen (€ bruto/jaar)**")
+                    fig_inc = go.Figure(go.Scatter(
+                        x=df_lc_exp["year"], y=df_lc_exp["modal_income"],
+                        mode="lines+markers",
+                        line=dict(color="#2ca02c", width=2),
+                        marker=dict(size=4),
+                        hovertemplate="%{x}: € %{y:,.0f}<extra></extra>",
+                    ))
+                    fig_inc.update_layout(
+                        height=200, margin=dict(l=10, r=10, t=10, b=10),
+                        yaxis=dict(autorange=True, tickformat=",.0f"),
+                        xaxis=dict(tickformat="d"),
+                        showlegend=False,
+                    )
+                    st.plotly_chart(fig_inc, use_container_width=True)
+                st.dataframe(
+                    df_lc_exp.rename(columns={
+                        "year": "Jaar", "modal_income": "Modaal inkomen (€)",
+                        "rate_totaal": "Rente % (DNB)", "max_mortgage": "Max. hypotheek (€)",
+                    })[["Jaar", "Modaal inkomen (€)", "Rente % (DNB)", "Max. hypotheek (€)"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
         # ── model validation ──────────────────────────────────────────────────
         if woz_est and woz_est.estimated_value:

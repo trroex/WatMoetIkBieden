@@ -5,6 +5,9 @@ One-stop Dutch housing market bid price estimator – free public data only.
 
 ## Quick start
 
+# start app: 
+.venv\Scripts\streamlit run app.py
+
 ```powershell
 # 1. Install Python 3.11+  →  https://www.python.org/downloads/
 # 2. Create venv & install
