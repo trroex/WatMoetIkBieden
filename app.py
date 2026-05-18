@@ -298,33 +298,68 @@ def show_results(data, user_input: dict) -> None:
                 else:
                     mc5.metric("Nieuwbouw", "–")
 
-                # ── price trend chart: COROP YoY% vs national ────────────────
-                periods  = [p.period_label for p in pbk.corop_data]
-                yoy_reg  = [p.yoy_pct for p in pbk.corop_data]
-                yoy_nat  = [p.yoy_pct for p in pbk.national_data]
+                # ── price trend chart: COROP YoY% vs national + COROP share ───
+                # Align corop and national by period so the share ratio is correct
+                _nat_tx_map  = {p.period: p.sales_count for p in pbk.national_data}
+                periods      = [p.period_label for p in pbk.corop_data]
+                yoy_reg      = [p.yoy_pct for p in pbk.corop_data]
+                yoy_nat      = [p.yoy_pct for p in pbk.national_data]
+                _tx_share_abs = [
+                    round(p.sales_count / _nat_tx_map[p.period] * 100, 3)
+                    if (p.sales_count and _nat_tx_map.get(p.period))
+                    else None
+                    for p in pbk.corop_data
+                ]
+                # Quarter-over-quarter change in market share (pp) — velocity signal
+                tx_share = [None] + [
+                    round(_tx_share_abs[i] - _tx_share_abs[i - 1], 3)
+                    if (_tx_share_abs[i] is not None and _tx_share_abs[i - 1] is not None)
+                    else None
+                    for i in range(1, len(_tx_share_abs))
+                ]
+                _corop_short = pbk.corop_name.replace(" (CR)", "")
 
                 fig_pbk = go.Figure()
+
+                # COROP share velocity bars on secondary y-axis (behind price lines)
+                fig_pbk.add_trace(go.Bar(
+                    x=periods, y=tx_share,
+                    name="Δ COROP-aandeel (pp QoQ)",
+                    marker_color=[
+                        "rgba(44,160,44,0.30)" if (v is not None and v >= 0) else "rgba(214,39,40,0.25)"
+                        for v in tx_share
+                    ],
+                    yaxis="y2",
+                    hovertemplate="%{x}: %{y:+.3f}pp<extra>Δ COROP-aandeel</extra>",
+                ))
+
+                # Price YoY% lines on primary y-axis
                 fig_pbk.add_trace(go.Scatter(
                     x=periods, y=yoy_reg,
                     mode="lines+markers",
-                    name=pbk.corop_name.replace(" (CR)", ""),
+                    name=f"Prijsgroei {_corop_short}",
                     line=dict(color="#1f77b4", width=2),
                     marker=dict(size=5),
-                    hovertemplate="%{x}: %{y:+.1f}%<extra>COROP</extra>",
+                    hovertemplate="%{x}: %{y:+.1f}%<extra>Prijsgroei COROP</extra>",
                 ))
                 fig_pbk.add_trace(go.Scatter(
                     x=periods, y=yoy_nat,
                     mode="lines+markers",
-                    name="Nederland",
-                    line=dict(color="#aaaaaa", width=1.5, dash="dot"),
+                    name="Prijsgroei NL",
+                    line=dict(color="#888888", width=1.5, dash="dot"),
                     marker=dict(size=4),
-                    hovertemplate="%{x}: %{y:+.1f}%<extra>Nederland</extra>",
+                    hovertemplate="%{x}: %{y:+.1f}%<extra>Prijsgroei NL</extra>",
                 ))
-                fig_pbk.add_hline(y=0, line_color="#cccccc", line_width=1)
+                fig_pbk.add_hline(y=0, line_color="#dddddd", line_width=1)
                 fig_pbk.update_layout(
                     yaxis=dict(title="Prijsverandering YoY (%)", ticksuffix="%"),
+                    yaxis2=dict(
+                        title="Δ aandeel (pp)",
+                        overlaying="y", side="right",
+                        ticksuffix="pp", showgrid=False,
+                    ),
                     xaxis=dict(title=""),
-                    height=260,
+                    height=300,
                     margin=dict(l=10, r=10, t=10, b=10),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
                     hovermode="x unified",
@@ -389,6 +424,49 @@ def show_results(data, user_input: dict) -> None:
                             f"Aanbodlabel: **{bouw.supply_label}**. "
                             "Bron: CBS 86054NED · 85819NED · NLOD"
                         )
+
+                        # ── woningtype breakdown (COROP, 86084NED) ───────────
+                        if bouw.type_years:
+                            st.markdown("**Nieuwbouw naar woningtype** (COROP-niveau)")
+                            _type_colors = {
+                                "Tussenwoning": "#1f77b4",
+                                "Hoekwoning":   "#aec7e8",
+                                "2-onder-1-kap":"#ff7f0e",
+                                "Vrijstaand":   "#2ca02c",
+                                "Meergezins":   "#9467bd",
+                            }
+                            _type_fields = {
+                                "Tussenwoning": [ty.tussenwoning for ty in bouw.type_years],
+                                "Hoekwoning":   [ty.hoekwoning   for ty in bouw.type_years],
+                                "2-onder-1-kap":[ty.twee_kap     for ty in bouw.type_years],
+                                "Vrijstaand":   [ty.vrijstaand   for ty in bouw.type_years],
+                                "Meergezins":   [ty.meergezins   for ty in bouw.type_years],
+                            }
+                            years_t = [ty.year for ty in bouw.type_years]
+
+                            fig_type = go.Figure()
+                            for type_name, vals in _type_fields.items():
+                                fig_type.add_trace(go.Bar(
+                                    x=years_t, y=vals,
+                                    name=type_name,
+                                    marker_color=_type_colors[type_name],
+                                    hovertemplate=f"%{{x}}: %{{y:,}}<extra>{type_name}</extra>",
+                                ))
+                            fig_type.update_layout(
+                                barmode="stack",
+                                title=dict(
+                                    text=f"<b>{_corop_label}</b>  <span style='font-size:12px;color:#888'>COROP-niveau</span>",
+                                    font=dict(size=13), x=0, xanchor="left",
+                                ),
+                                yaxis=dict(title="Woningen"),
+                                xaxis=dict(title="", tickformat="d"),
+                                height=280,
+                                margin=dict(l=10, r=10, t=40, b=10),
+                                legend=dict(orientation="h", yanchor="bottom", y=1.08, xanchor="left", x=0),
+                                hovermode="x unified",
+                            )
+                            st.plotly_chart(fig_type, use_container_width=True)
+                            st.caption("Bron: CBS 86084NED · NLOD")
 
                 st.caption("Bron: CBS PBK 85819NED · 85773NED · 86054NED · Kadaster · NLOD")
             else:
