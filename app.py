@@ -231,6 +231,171 @@ def show_results(data, user_input: dict) -> None:
         df_feat = pd.DataFrame(rows)
         st.dataframe(df_feat, use_container_width=True, hide_index=True)
 
+        # ── marktdynamiek – PBK COROP heat indicator ──────────────────────────
+        st.markdown("##### Marktdynamiek")
+        if a and a.gemeentecode:
+            with st.spinner("Prijsindex COROP ophalen (CBS)…"):
+                try:
+                    from watmoetikbieden.sources.pbk_corop import fetch_pbk_corop
+                    import plotly.graph_objects as go
+                    pbk = fetch_pbk_corop(a.gemeentecode)
+                except Exception as exc:
+                    pbk = None
+                    st.warning(f"Marktdynamiek niet beschikbaar: {exc}")
+
+            if pbk and pbk.latest:
+                latest  = pbk.latest
+                nat     = pbk.national_latest
+                delta   = pbk.heat_delta_pct
+
+                # Fetch building stats — use 32q so that even if CBS has released
+                # Q1/Q2 of the current year, the window still includes all 4 quarters
+                # of 2020 (needed to compute annual transaction totals for supply pressure).
+                pbk24 = fetch_pbk_corop(a.gemeentecode, n_quarters=32)
+                try:
+                    from watmoetikbieden.sources.building_stats import fetch_building_stats
+                    bouw = fetch_building_stats(a.gemeentecode, pbk24)
+                except Exception:
+                    bouw = None
+
+                _gm_label    = a.gemeentenaam or a.gemeentecode or (bouw.gemeente_code if bouw else "")
+                _corop_label = bouw.corop_name.replace(" (CR)", "") if bouw else pbk.corop_name.replace(" (CR)", "")
+
+                mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+                mc1.metric(
+                    "Prijsdruk regio",
+                    pbk.heat_label,
+                    help=f"COROP-regio: {pbk.corop_name}",
+                )
+                mc2.metric(
+                    f"Prijsstijging {latest.period_label}",
+                    f"{latest.yoy_pct:+.1f}%" if latest.yoy_pct is not None else "–",
+                    delta=f"{delta:+.1f}pp t.o.v. NL" if delta is not None else None,
+                    delta_color="normal" if (delta is not None and delta >= 0) else "inverse",
+                    help="Jaar-op-jaar prijsverandering in deze COROP-regio (CBS PBK 85819NED)",
+                )
+                mc3.metric(
+                    f"Transacties {latest.period_label}",
+                    f"{latest.sales_count:,}".replace(",", ".") if latest.sales_count else "–",
+                    delta=f"{latest.sales_yoy_pct:+.1f}% YoY" if latest.sales_yoy_pct is not None else None,
+                    delta_color="normal",
+                    help="Aantal verkochte woningen in de COROP-regio (Kadaster via CBS)",
+                )
+                mc4.metric(
+                    f"Gem. verkoopprijs {latest.period_label}",
+                    _fmt_eur(latest.avg_price),
+                    help="Gemiddelde verkoopprijs bestaande koopwoningen in de COROP-regio",
+                )
+                if bouw and bouw.latest:
+                    bl = bouw.latest
+                    mc5.metric(
+                        f"Nieuwbouw {bl.year}",
+                        f"{bl.nieuwbouw:,}".replace(",", ".") if bl.nieuwbouw else "–",
+                        delta=f"{bl.supply_pressure:.0f}% van transacties" if bl.supply_pressure else None,
+                        delta_color="off",
+                        help=f"Nieuw opgeleverde woningen in gemeente {_gm_label} · Aanboddruk t.o.v. COROP-transacties: {bouw.supply_label}",
+                    )
+                else:
+                    mc5.metric("Nieuwbouw", "–")
+
+                # ── price trend chart: COROP YoY% vs national ────────────────
+                periods  = [p.period_label for p in pbk.corop_data]
+                yoy_reg  = [p.yoy_pct for p in pbk.corop_data]
+                yoy_nat  = [p.yoy_pct for p in pbk.national_data]
+
+                fig_pbk = go.Figure()
+                fig_pbk.add_trace(go.Scatter(
+                    x=periods, y=yoy_reg,
+                    mode="lines+markers",
+                    name=pbk.corop_name.replace(" (CR)", ""),
+                    line=dict(color="#1f77b4", width=2),
+                    marker=dict(size=5),
+                    hovertemplate="%{x}: %{y:+.1f}%<extra>COROP</extra>",
+                ))
+                fig_pbk.add_trace(go.Scatter(
+                    x=periods, y=yoy_nat,
+                    mode="lines+markers",
+                    name="Nederland",
+                    line=dict(color="#aaaaaa", width=1.5, dash="dot"),
+                    marker=dict(size=4),
+                    hovertemplate="%{x}: %{y:+.1f}%<extra>Nederland</extra>",
+                ))
+                fig_pbk.add_hline(y=0, line_color="#cccccc", line_width=1)
+                fig_pbk.update_layout(
+                    yaxis=dict(title="Prijsverandering YoY (%)", ticksuffix="%"),
+                    xaxis=dict(title=""),
+                    height=260,
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                    hovermode="x unified",
+                )
+                st.plotly_chart(fig_pbk, use_container_width=True)
+
+                # ── building activity expander ────────────────────────────────
+                if bouw and bouw.years:
+                    with st.expander(f"Nieuwbouw & woningaanbod – {_gm_label} (gemeente-niveau)"):
+                        years_b  = [y.year for y in bouw.years]
+                        nb_vals  = [y.nieuwbouw or 0 for y in bouw.years]
+                        sl_vals  = [-(y.sloop or 0) for y in bouw.years]
+                        sp_vals  = [y.supply_pressure for y in bouw.years]
+
+                        fig_bouw = go.Figure()
+                        fig_bouw.add_trace(go.Bar(
+                            x=years_b, y=nb_vals,
+                            name="Nieuwbouw",
+                            marker_color="#2ca02c",
+                            hovertemplate="%{x}: %{y:,} woningen<extra>Nieuwbouw</extra>",
+                        ))
+                        fig_bouw.add_trace(go.Bar(
+                            x=years_b, y=sl_vals,
+                            name="Sloop",
+                            marker_color="#d62728",
+                            hovertemplate="%{x}: %{customdata:,} woningen<extra>Sloop</extra>",
+                            customdata=[y.sloop or 0 for y in bouw.years],
+                        ))
+                        # Supply pressure on secondary y-axis
+                        fig_bouw.add_trace(go.Scatter(
+                            x=years_b, y=sp_vals,
+                            name="Aanboddruk (% v. transacties)",
+                            mode="lines+markers",
+                            line=dict(color="#ff7f0e", width=2),
+                            marker=dict(size=6),
+                            yaxis="y2",
+                            hovertemplate="%{x}: %{y:.1f}%<extra>Aanboddruk</extra>",
+                        ))
+                        fig_bouw.update_layout(
+                            barmode="relative",
+                            yaxis=dict(title="Woningen"),
+                            yaxis2=dict(
+                                title="Aanboddruk (%)",
+                                overlaying="y", side="right",
+                                ticksuffix="%", showgrid=False,
+                            ),
+                            xaxis=dict(title="", tickformat="d"),
+                            height=280,
+                            margin=dict(l=10, r=10, t=40, b=10),
+                            title=dict(
+                                text=f"<b>{_gm_label}</b>  <span style='font-size:12px;color:#888'>gemeente-niveau · aanboddruk t.o.v. {_corop_label} (COROP)</span>",
+                                font=dict(size=13),
+                                x=0, xanchor="left",
+                            ),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.08, xanchor="left", x=0),
+                            hovermode="x unified",
+                        )
+                        st.plotly_chart(fig_bouw, use_container_width=True)
+                        st.caption(
+                            f"Nieuwbouw/sloop: gemeente-niveau ({_gm_label}). "
+                            f"Aanboddruk = gemeente-nieuwbouw / COROP-transacties ({_corop_label}) × 100. "
+                            f"Aanbodlabel: **{bouw.supply_label}**. "
+                            "Bron: CBS 86054NED · 85819NED · NLOD"
+                        )
+
+                st.caption("Bron: CBS PBK 85819NED · 85773NED · 86054NED · Kadaster · NLOD")
+            else:
+                st.info("Geen COROP-data beschikbaar voor dit adres.")
+        else:
+            st.info("Gemeentecode ontbreekt — marktdynamiek niet beschikbaar.")
+
     # ── tab 2: woz ───────────────────────────────────────────────────────────
     with tab_woz:
         import plotly.graph_objects as go

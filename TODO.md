@@ -110,7 +110,44 @@ After implementing, re-run against the known test case:
 
 ---
 
-## 2. Replace hardcoded modal income with CBS API
+## 2. Replace public Overpass API with self-hosted or commercial instance
+
+**Status:** ⏳ pending  
+**Priority:** required before commercial use  
+**Context:** school proximity feature in Omgeving tab
+
+### Problem
+
+`nearby_schools.py` queries the public Overpass API (`overpass-api.de`) to find
+schools within 1,500 m of an address.  The public endpoint is a donated service
+explicitly not intended for production or commercial use.  OSM data itself is
+fine (ODbL, commercial use allowed with attribution), but the *endpoint* is not.
+
+The 7-day file cache in `.cache/overpass/` limits query volume significantly
+(one query per unique address per week), but does not change the terms of use.
+
+### Solution options
+
+1. **Self-host Overpass** — run an Overpass instance on a ~64–128 GB server with
+   the OSM planet or a regional extract loaded.  Free but requires ops.
+2. **Commercial Overpass provider** — e.g. Geofabrik, OpenCage, or similar.
+   Pay-per-query or subscription; no ops overhead.
+3. **Replace with DUO-only distance calculation** — DUO vestigingen CSVs contain
+   postcodes for every school.  Geocode those to coordinates and compute haversine
+   distance from the BAG address.  Loses OSM tag detail (ISCED levels, operator
+   names) but is 100% commercially clean and already in use elsewhere in the app.
+
+### Files to modify
+
+```
+src/watmoetikbieden/sources/nearby_schools.py
+    - Replace _fetch_overpass() / _OVERPASS_URL with chosen alternative
+    - Cache strategy can remain unchanged
+```
+
+---
+
+## 3. Replace hardcoded modal income with CBS API
 
 **Status:** ⏳ pending  
 **Priority:** medium – hardcoded table works for now; CBS API preferred for yearly updates
