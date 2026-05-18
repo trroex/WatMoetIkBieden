@@ -310,12 +310,12 @@ def show_results(data, user_input: dict) -> None:
                     else None
                     for p in pbk.corop_data
                 ]
-                # Quarter-over-quarter change in market share (pp) — velocity signal
-                tx_share = [None] + [
-                    round(_tx_share_abs[i] - _tx_share_abs[i - 1], 3)
-                    if (_tx_share_abs[i] is not None and _tx_share_abs[i - 1] is not None)
+                # Year-over-year change in market share (pp) — consistent with price YoY lines
+                tx_share = [None] * 4 + [
+                    round(_tx_share_abs[i] - _tx_share_abs[i - 4], 3)
+                    if (_tx_share_abs[i] is not None and _tx_share_abs[i - 4] is not None)
                     else None
-                    for i in range(1, len(_tx_share_abs))
+                    for i in range(4, len(_tx_share_abs))
                 ]
                 _corop_short = pbk.corop_name.replace(" (CR)", "")
 
@@ -324,7 +324,7 @@ def show_results(data, user_input: dict) -> None:
                 # COROP share velocity bars on secondary y-axis (behind price lines)
                 fig_pbk.add_trace(go.Bar(
                     x=periods, y=tx_share,
-                    name="Δ COROP-aandeel (pp QoQ)",
+                    name="Δ COROP-aandeel (pp YoY)",
                     marker_color=[
                         "rgba(44,160,44,0.30)" if (v is not None and v >= 0) else "rgba(214,39,40,0.25)"
                         for v in tx_share
