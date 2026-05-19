@@ -654,11 +654,34 @@ def show_results(data, user_input: dict) -> None:
         # Lending capacity series
         lc_rows = lending_capacity_series()
 
-        if woz_pts or buurt_series or gemeente_woz_series or lc_rows:
+        # DNB mortgage rates (ECB SDMX, monthly, 2003–present)
+        mortgage_rates: object = None
+        try:
+            from watmoetikbieden.sources.dnb_mortgage_rates import fetch_mortgage_rates
+            mortgage_rates = fetch_mortgage_rates()
+        except Exception:
+            mortgage_rates = None
+
+        _has_rate = mortgage_rates is not None and bool(
+            getattr(mortgage_rates, "points", None)
+        )
+
+        if woz_pts or buurt_series or gemeente_woz_series or lc_rows or _has_rate:
             st.markdown("##### WOZ-waarde & maximale hypotheek bij modaal inkomen")
 
-            fig_woz = go.Figure()
+            from plotly.subplots import make_subplots
 
+            if _has_rate:
+                fig_woz = make_subplots(
+                    rows=2, cols=1,
+                    shared_xaxes=True,
+                    row_heights=[0.65, 0.35],
+                    vertical_spacing=0.06,
+                )
+            else:
+                fig_woz = make_subplots(rows=1, cols=1)
+
+            # ── row 1: WOZ values + max mortgage ─────────────────────────────
             if woz_pts:
                 years_woz, vals_woz = zip(*woz_pts)
                 fig_woz.add_trace(go.Scatter(
@@ -668,7 +691,7 @@ def show_results(data, user_input: dict) -> None:
                     line=dict(color="#1f77b4", width=2),
                     marker=dict(size=5),
                     hovertemplate="%{x}: € %{y:,.0f}<extra>WOZ dit adres</extra>",
-                ))
+                ), row=1, col=1)
 
             if buurt_series:
                 buurt_pts = sorted(buurt_series.items())
@@ -680,7 +703,7 @@ def show_results(data, user_input: dict) -> None:
                     line=dict(color="#ff7f0e", width=2, dash="dot"),
                     marker=dict(size=4),
                     hovertemplate="%{x}: € %{y:,.0f}<extra>Gem. WOZ buurt</extra>",
-                ))
+                ), row=1, col=1)
 
             if gemeente_woz_series:
                 gm_pts = sorted(gemeente_woz_series.items())
@@ -692,7 +715,7 @@ def show_results(data, user_input: dict) -> None:
                     line=dict(color="#9467bd", width=1.5, dash="dash"),
                     marker=dict(size=4),
                     hovertemplate="%{x}: € %{y:,.0f}<extra>Gem. WOZ gemeente</extra>",
-                ))
+                ), row=1, col=1)
 
             if lc_rows:
                 df_lc = pd.DataFrame(lc_rows)
@@ -703,23 +726,90 @@ def show_results(data, user_input: dict) -> None:
                     line=dict(color="#2ca02c", width=2, dash="dash"),
                     marker=dict(size=4),
                     hovertemplate="%{x}: € %{y:,.0f}<extra>Max. hypotheek modaal</extra>",
-                ))
+                ), row=1, col=1)
+
+            # ── row 2: monthly mortgage rate ──────────────────────────────────
+            if _has_rate:
+                # Convert "YYYY-MM" → decimal year so both subplots share a
+                # numeric (integer-year) axis without type conflicts.
+                def _period_to_decimal(p: str) -> float:
+                    yr, mo = int(p[:4]), int(p[5:7])
+                    return yr + (mo - 1) / 12
+
+                _rate_x      = [_period_to_decimal(pt.period) for pt in mortgage_rates.points]
+                _rate_labels = [pt.period for pt in mortgage_rates.points]
+                _rate_vals   = [pt.rate_pct for pt in mortgage_rates.points]
+                fig_woz.add_trace(go.Scatter(
+                    x=_rate_x, y=_rate_vals,
+                    customdata=_rate_labels,
+                    mode="lines",
+                    name="Hypotheekrente NL",
+                    line=dict(color="#d62728", width=1.5),
+                    hovertemplate="%{customdata}: %{y:.2f}%<extra>Hypotheekrente</extra>",
+                    showlegend=True,
+                ), row=2, col=1)
+
+            # ── layout ────────────────────────────────────────────────────────
+            # Determine earliest year with buurt WOZ data so both subplots
+            # start at the same point rather than at the rate series origin (2003).
+            _woz_x_start: int | str | None = None
+            if buurt_series:
+                _woz_x_start = min(buurt_series.keys())
+            elif woz_pts:
+                _woz_x_start = min(y for y, _ in woz_pts)
+            elif gemeente_woz_series:
+                _woz_x_start = min(gemeente_woz_series.keys())
+
+            fig_woz.update_yaxes(
+                title_text="Waarde (€)", tickformat=",.0f", autorange=True,
+                row=1, col=1,
+            )
+            if _has_rate:
+                fig_woz.update_yaxes(
+                    title_text="Rente (%)", ticksuffix="%", rangemode="tozero",
+                    row=2, col=1,
+                )
+                fig_woz.update_xaxes(title_text="", row=1, col=1)
+                # shared x-axis: range set on the bottom subplot axis
+                _x_end = (
+                    _period_to_decimal(mortgage_rates.latest.period) + 1 / 12
+                    if mortgage_rates and mortgage_rates.latest else None
+                )
+                _xrange = (
+                    [_woz_x_start - 0.5, _x_end]
+                    if (_woz_x_start is not None and _x_end is not None) else None
+                )
+                fig_woz.update_xaxes(
+                    title_text="",
+                    tickformat="d",   # show integer year ticks on shared axis
+                    range=_xrange,
+                    row=2, col=1,
+                )
+            else:
+                fig_woz.update_xaxes(title_text="Jaar", tickformat="d", row=1, col=1)
 
             fig_woz.update_layout(
-                yaxis=dict(title="Waarde (€)", tickformat=",.0f", autorange=True),
-                xaxis=dict(title="Jaar", tickformat="d"),
-                height=380,
+                height=480 if _has_rate else 360,
                 margin=dict(l=10, r=10, t=10, b=10),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
                 hovermode="x unified",
             )
             st.plotly_chart(fig_woz, use_container_width=True)
 
+            captions = []
             if lc_rows:
-                st.caption(
+                captions.append(
                     f"Max. hypotheek: annuïteit {TERM_YEARS} jr, woonquote {WOONQUOTE*100:.0f}% bruto, "
-                    "DNB-rente jaargemiddelde. Modaal inkomen: CBS/hardcoded."
+                    "ECB/DNB-rente jaargemiddelde (AAR). Inkomen: CBS 83931NED mediaan bruto (≥2011); hardcoded vóór 2011."
                 )
+            if _has_rate:
+                captions.append(
+                    f"Hypotheekrente: maandelijks AAR nieuwe woninghypotheken NL "
+                    f"(ECB MIR · DNB, 2003–heden). Meest recent: {mortgage_rates.latest.period} "
+                    f"→ {mortgage_rates.latest.rate_pct:.2f}%"
+                )
+            for cap in captions:
+                st.caption(cap)
         elif w and not w.history:
             st.info("Geen WOZ-data beschikbaar voor dit adres.")
 
@@ -729,7 +819,7 @@ def show_results(data, user_input: dict) -> None:
                 df_lc_exp = pd.DataFrame(lc_rows)
                 mc1, mc2 = st.columns(2)
                 with mc1:
-                    st.markdown("**Rente (jaargemiddelde DNB, %)**")
+                    st.markdown("**Rente (jaargemiddelde ECB/DNB AAR, %)**")
                     fig_r = go.Figure(go.Scatter(
                         x=df_lc_exp["year"], y=df_lc_exp["rate_totaal"],
                         mode="lines+markers",
@@ -1383,6 +1473,30 @@ W_final = W_type × perceel_factor
                 "Tijdresolutie":  "Maandelijks",
                 "Laatste update": "mei 2025 (voorlopig)",
                 "Licentie":       "NLOD",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "CBS",
+                "Dataset":        "Inkomen van personen",
+                "Tabel-ID":       "83931NED",
+                "Beschrijving":   "Mediaan en gemiddeld persoonlijk bruto inkomen per jaar (alle personen, alle inkomensklassen). Gebruikt als inkomensinput voor de maximale hypotheekberekening (≥2011). Vóór 2011: hardcoded CPB-schattingen.",
+                "Granulariteit":  "Nationaal",
+                "Perioden":       "2011 – heden",
+                "Tijdresolutie":  "Jaarlijks",
+                "Laatste update": "2024",
+                "Licentie":       "NLOD",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "ECB / DNB",
+                "Dataset":        "MFI Interest Rate Statistics — woninghypotheken NL",
+                "Tabel-ID":       "MIR",
+                "Beschrijving":   "Maandelijkse gemiddelde hypotheekrente voor nieuwe woninghypotheken in Nederland (annualised agreed rate, alle looptijden). Macro-overlay: lage rente correleert met prijsacceleratie.",
+                "Granulariteit":  "Nationaal",
+                "Perioden":       "2003 – heden",
+                "Tijdresolutie":  "Maandelijks",
+                "Laatste update": "mrt 2026",
+                "Licentie":       "ECB open data",
                 "Commercieel":    "✅ Ja",
             },
             {

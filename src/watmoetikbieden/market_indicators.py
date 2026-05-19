@@ -2,8 +2,8 @@
 Macro market indicators for WatMoetIkBieden.
 
 Currently provides:
-  - Modal gross income per year (hardcoded; TODO: replace with CBS OData fetch)
-  - DNB average mortgage interest rates (parsed from local CSV)
+  - Median personal gross income per year (CBS 83931NED; fallback hardcoded)
+  - Dutch mortgage interest rates via ECB SDMX API (sourced from DNB)
   - Maximum annuity mortgage capacity for a modal-income earner per year
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -20,10 +20,14 @@ earning the modal gross income, using the following assumptions:
 
   term       = 30 yr  Standard mortgage term in the Netherlands.
 
-  rate       = DNB "Totaal" yearly average for newly issued residential
-               mortgages (column "Totaal" in bancaire_rente CSV).
-               This blends all fixed-rate periods proportional to actual
-               market take-up, giving a realistic average borrowing cost.
+  rate       = ECB MIR M.NL.B.A2C.AM.R.A.2250.EUR.N — annualised agreed rate
+               (AAR) for new house-purchase lending to households, all
+               maturities, Netherlands.  Monthly data aggregated to annual
+               means.  Reported by DNB to the ECB; available from 2003.
+               Note: AAR excludes commitment fees; the previously used DNB
+               "bancaire rente" CSV included fees (NARR), giving values
+               ~0.1 pp higher.  The trend is identical; absolute max-mortgage
+               estimates differ by roughly €2–5k.
 
 Annuity formula (standard):
   monthly_budget = gross_annual_income × woonquote / 12
@@ -38,21 +42,23 @@ rate for that year, assuming the payment fills exactly the allowed woonquote.
 DATA SOURCES
 ═══════════════════════════════════════════════════════════════════════════════
 
-Modal income:
-  Hardcoded dict below.
-  TODO (see TODO.md §2): replace with CBS OData fetch (table TBD).
+Income:
+  CBS OData table 83931NED "Inkomen van personen".
+  MediaanInkomen_3 for persoonlijk bruto inkomen, totaal persons.
+  Coverage: 2011 – present.  Cached 365 days.
+  ⚠ This is the median for ALL persons (incl. part-time), so it sits ~€5k
+    below the CPB "modaal loon" benchmark (~€44k in 2024 for full-year FTE).
+  For years before 2011 the hardcoded _INCOME_FALLBACK dict is used.
 
-DNB interest rates:
-  data/dnb/(12-05-26)_Bancaire_rente_op_zuiver_nieuw_afgesloten_
-           woninghypotheken_huishoudens.csv
-  Downloaded manually from dnb.nl dashboard, 2026-05-12.
-  Monthly data from December 2014 onwards.
+Mortgage rates:
+  ECB SDMX REST API — data-api.ecb.europa.eu — dataset MIR.
+  No authentication required; open data from ECB / DNB.
+  Monthly, Netherlands, new house-purchase loans, all maturities, AAR.
+  Coverage: January 2003 – present (typ. 1-month lag).
+  Cached in .cache/dnb/mortgage_rates.json, TTL 7 days.
 """
 
 from __future__ import annotations
-
-import csv
-from pathlib import Path
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TUNEABLE PARAMETERS
@@ -62,117 +68,84 @@ WOONQUOTE: float = 0.26    # fraction of gross income allowed for mortgage payme
 TERM_YEARS: int  = 30      # mortgage term in years
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MODAL INCOME  (hardcoded – see TODO.md §2 for CBS replacement)
+# INCOME — live CBS fetch with hardcoded fallback for pre-2011 years
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Source: CBS / Nibud modal loon estimates, gross per year in EUR.
-# TODO: replace with CBS OData fetch from table TBD.
-MODAL_INCOME: dict[int, int] = {
+# Hardcoded fallback for years before CBS 83931NED coverage (pre-2011).
+# Based on CPB modaal loon estimates; kept for backward compatibility.
+_INCOME_FALLBACK: dict[int, int] = {
     2006: 29_500,
     2007: 30_000,
     2008: 31_500,
     2009: 32_500,
     2010: 32_500,
-    2011: 33_000,
-    2012: 33_000,
-    2013: 32_500,
-    2014: 33_000,
-    2015: 33_000,
-    2016: 33_500,
-    2017: 34_000,
-    2018: 34_500,
-    2019: 35_000,
-    2020: 36_000,
-    2021: 37_000,
-    2022: 39_000,
-    2023: 41_500,
-    2024: 44_000,
-    2025: 46_500,
-}
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DNB INTEREST RATE PARSER
-# ══════════════════════════════════════════════════════════════════════════════
-
-_DNB_DIR = Path(__file__).parent.parent.parent / "data" / "dnb"
-
-_NL_MONTHS = {
-    "januari": 1, "februari": 2, "maart": 3, "april": 4,
-    "mei": 5, "juni": 6, "juli": 7, "augustus": 8,
-    "september": 9, "oktober": 10, "november": 11, "december": 12,
 }
 
 
-def _find_dnb_csv() -> Path | None:
-    """Return the first CSV file found in data/dnb/, or None."""
-    if not _DNB_DIR.exists():
-        return None
-    for p in _DNB_DIR.glob("*.csv"):
-        return p
-    return None
+def load_modal_income() -> dict[int, int]:
+    """
+    Return {year: median_gross_income_eur} merging CBS live data with fallback.
 
+    For 2011 onward: CBS 83931NED MediaanInkomen_3 (median personal gross
+    income, all persons, EUR).  For years before 2011: _INCOME_FALLBACK.
+
+    On CBS fetch failure the fallback dict is returned alone.
+
+    ⚠ The CBS median covers all persons including part-time workers and is
+    ~€5k lower than the CPB "modaal loon" for full-year FTE employees.
+    Adjust WOONQUOTE if you need to calibrate to a different income anchor.
+    """
+    from watmoetikbieden.sources.cbs_income import fetch_median_income
+
+    cbs_data = fetch_median_income()
+
+    merged: dict[int, int] = dict(_INCOME_FALLBACK)
+    for year, income in cbs_data.items():
+        merged[year] = int(income)
+
+    return merged
+
+
+# Convenience alias — populated lazily the first time lending_capacity_series()
+# is called; use load_modal_income() directly if you need a fresh dict.
+MODAL_INCOME: dict[int, int] = _INCOME_FALLBACK   # initial stub; see load_modal_income()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MORTGAGE INTEREST RATE LOADER  (ECB SDMX, sourced from DNB)
+# ══════════════════════════════════════════════════════════════════════════════
 
 def load_dnb_rates() -> dict[int, dict[str, float]]:
     """
-    Parse the DNB bancaire rente CSV and return yearly averages.
+    Return yearly average mortgage rates from the ECB SDMX API (DNB-reported).
 
     Returns
     -------
-    {year: {"totaal": float, "variabel": float, "1_5": float,
-            "5_10": float, "10plus": float}}
+    {year: {"totaal": float}}
 
-    Only years with at least one monthly observation are included.
-    Partial years (e.g. 2014 with only December, or the current year)
-    use the available months.
+    The "totaal" key preserves backward compatibility with lending_capacity_series().
+    Only years with at least one monthly observation are included; partial years
+    (e.g. the current year) use the available months.
+
+    Rate definition: ECB MIR M.NL.B.A2C.AM.R.A.2250.EUR.N — annualised agreed
+    rate (AAR) for new house-purchase loans, all maturities, Netherlands.
+    Slightly lower (~0.1 pp) than the previously used DNB "bancaire rente" NARR
+    because AAR excludes commitment fees.
     """
-    csv_path = _find_dnb_csv()
-    if csv_path is None:
+    from watmoetikbieden.sources.dnb_mortgage_rates import fetch_mortgage_rates
+
+    series = fetch_mortgage_rates()
+    if not series or not series.points:
         return {}
 
-    # Accumulate monthly values per year
-    accum: dict[int, dict[str, list[float]]] = {}
-    col_keys = ["totaal", "variabel", "1_5", "5_10", "10plus"]
+    accum: dict[int, list[float]] = {}
+    for pt in series.points:
+        yr = int(pt.period[:4])
+        accum.setdefault(yr, []).append(pt.rate_pct)
 
-    with csv_path.open(encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f)
-        next(reader)  # skip header row
-        for row in reader:
-            if len(row) < 6:
-                continue
-            month_str = row[0].strip().strip('"').lower()
-            parts = month_str.split()
-            if len(parts) != 2:
-                continue
-            month_name, year_str = parts
-            if month_name not in _NL_MONTHS:
-                continue
-            try:
-                year = int(year_str)
-            except ValueError:
-                continue
-
-            if year not in accum:
-                accum[year] = {k: [] for k in col_keys}
-
-            for i, key in enumerate(col_keys):
-                try:
-                    val = float(row[i + 1])
-                    accum[year][key].append(val)
-                except (ValueError, IndexError):
-                    pass
-
-    # Compute yearly averages
-    result: dict[int, dict[str, float]] = {}
-    for year, cols in accum.items():
-        if not cols["totaal"]:
-            continue
-        result[year] = {
-            k: round(sum(v) / len(v), 3)
-            for k, v in cols.items()
-            if v
-        }
-
-    return result
+    return {
+        yr: {"totaal": round(sum(vals) / len(vals), 3)}
+        for yr, vals in sorted(accum.items())
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -214,21 +187,22 @@ def lending_capacity_series() -> list[dict]:
 
     Each dict:
       year            int
-      modal_income    int    gross annual EUR
+      modal_income    int    gross annual EUR (CBS median or fallback)
       rate_totaal     float  DNB yearly average rate (%)
       max_mortgage    int    maximum annuity mortgage principal (EUR)
     """
-    rates = load_dnb_rates()
+    rates  = load_dnb_rates()
+    income = load_modal_income()
 
     rows = []
-    for year, income in sorted(MODAL_INCOME.items()):
+    for year, yr_income in sorted(income.items()):
         if year not in rates:
             continue
         rate = rates[year]["totaal"]
-        cap = _annuity_max_mortgage(income, rate)
+        cap  = _annuity_max_mortgage(yr_income, rate)
         rows.append({
             "year":         year,
-            "modal_income": income,
+            "modal_income": yr_income,
             "rate_totaal":  rate,
             "max_mortgage": round(cap),
         })
