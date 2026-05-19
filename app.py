@@ -258,10 +258,22 @@ def show_results(data, user_input: dict) -> None:
                 except Exception:
                     bouw = None
 
+                try:
+                    from watmoetikbieden.sources.building_permits import fetch_building_permits
+                    permits = fetch_building_permits(a.gemeentecode)
+                except Exception:
+                    permits = None
+
+                try:
+                    from watmoetikbieden.sources.migration import fetch_migration
+                    migration = fetch_migration(a.gemeentecode)
+                except Exception:
+                    migration = None
+
                 _gm_label    = a.gemeentenaam or a.gemeentecode or (bouw.gemeente_code if bouw else "")
                 _corop_label = bouw.corop_name.replace(" (CR)", "") if bouw else pbk.corop_name.replace(" (CR)", "")
 
-                mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+                mc1, mc2, mc3, mc4, mc5, mc6, mc7 = st.columns(7)
                 mc1.metric(
                     "Prijsdruk regio",
                     pbk.heat_label,
@@ -297,6 +309,33 @@ def show_results(data, user_input: dict) -> None:
                     )
                 else:
                     mc5.metric("Nieuwbouw", "–")
+
+                if permits and permits.latest:
+                    _t12 = permits.trailing_12m()
+                    _t12_delta = permits.yoy_trailing_12m()
+                    mc6.metric(
+                        f"Vergunningen {permits.latest.period_label}",
+                        f"{_t12:,}".replace(",", ".") if _t12 else "–",
+                        delta=f"{_t12_delta:+,}".replace(",", ".") + " YoY" if _t12_delta else None,
+                        delta_color="normal",
+                        help=f"Verleende bouwvergunningen (12m cumulatief) in {_gm_label} · Voorlopende indicator: ~12–18m voor opleveringen",
+                    )
+                else:
+                    mc6.metric("Vergunningen", "–")
+
+                if migration and migration.latest:
+                    _m12     = migration.trailing_12m_net()
+                    _m12_yoy = migration.yoy_trailing_12m()
+                    _m_sign  = "normal" if (_m12 is not None and _m12 >= 0) else "inverse"
+                    mc7.metric(
+                        f"Netto instroom {migration.latest.period_label}",
+                        f"{_m12:+,}".replace(",", ".") if _m12 is not None else "–",
+                        delta=f"{_m12_yoy:+,}".replace(",", ".") + " YoY" if _m12_yoy is not None else None,
+                        delta_color="normal",
+                        help=f"Netto binnenlandse verhuizingen naar {_gm_label} (12m cumulatief) · Vraagzijde-indicator: positief = instroom overtreft vertrek",
+                    )
+                else:
+                    mc7.metric("Netto instroom", "–")
 
                 # ── price trend chart: COROP YoY% vs national + COROP share ───
                 # Align corop and national by period so the share ratio is correct
@@ -425,6 +464,54 @@ def show_results(data, user_input: dict) -> None:
                             "Bron: CBS 86054NED · 85819NED · NLOD"
                         )
 
+                        # ── quarterly building permits (gemeente, 83671NED) ───
+                        if permits and permits.quarters:
+                            st.markdown("**Bouwvergunningen per kwartaal** (gemeente-niveau · voorlopende indicator)")
+                            _pq_periods  = [q.period_label for q in permits.quarters]
+                            _pq_vals     = [q.permits      for q in permits.quarters]
+
+                            # Trailing-12m rolling sum for trend line
+                            _pq_t12 = []
+                            for i in range(len(permits.quarters)):
+                                window = [q.permits for q in permits.quarters[max(0, i-3):i+1]]
+                                known  = [v for v in window if v is not None]
+                                _pq_t12.append(sum(known) if len(known) == 4 else None)
+
+                            fig_perm = go.Figure()
+                            fig_perm.add_trace(go.Bar(
+                                x=_pq_periods, y=_pq_vals,
+                                name="Vergunningen (kwartaal)",
+                                marker_color="rgba(148,103,189,0.55)",
+                                hovertemplate="%{x}: %{y:,}<extra>Vergunningen</extra>",
+                            ))
+                            fig_perm.add_trace(go.Scatter(
+                                x=_pq_periods, y=_pq_t12,
+                                name="12m voortschrijdend totaal",
+                                mode="lines",
+                                line=dict(color="#7b2fa8", width=2, dash="dot"),
+                                yaxis="y2",
+                                hovertemplate="%{x}: %{y:,}<extra>12m totaal</extra>",
+                            ))
+                            fig_perm.update_layout(
+                                yaxis =dict(title="Vergunningen (kwartaal)"),
+                                yaxis2=dict(
+                                    title="12m totaal",
+                                    overlaying="y", side="right",
+                                    showgrid=False,
+                                ),
+                                xaxis =dict(title=""),
+                                height=240,
+                                margin=dict(l=10, r=10, t=10, b=10),
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                                hovermode="x unified",
+                            )
+                            st.plotly_chart(fig_perm, use_container_width=True)
+                            st.caption(
+                                f"Bouwvergunningen voor woningen in {_gm_label}. "
+                                "Vergunningen lopen ~12–18 maanden voor op opleveringen. "
+                                "Bron: CBS 83671NED · NLOD"
+                            )
+
                         # ── woningtype breakdown (COROP, 86084NED) ───────────
                         if bouw.type_years:
                             st.markdown("**Nieuwbouw naar woningtype** (COROP-niveau)")
@@ -467,6 +554,70 @@ def show_results(data, user_input: dict) -> None:
                             )
                             st.plotly_chart(fig_type, use_container_width=True)
                             st.caption("Bron: CBS 86084NED · NLOD")
+
+                # ── migration flow expander (gemeente, 37230ned) ──────────────
+                if migration and migration.months:
+                    with st.expander("🚚 Bevolking & instroom", expanded=False):
+                        st.markdown(
+                            f"**Netto binnenlandse verhuizingen** (gemeente-niveau · maandelijkse CBS-data)"
+                        )
+
+                        _mg_periods  = [m.period_label for m in migration.months]
+                        _mg_vest     = [m.vestiging for m in migration.months]
+                        _mg_vert     = [m.vertrek   for m in migration.months]
+                        _mg_net      = [m.net        for m in migration.months]
+
+                        # Rolling 12-month net migration
+                        _mg_roll12: list[int | None] = []
+                        for i in range(len(migration.months)):
+                            window = [m.net for m in migration.months[max(0, i-11):i+1]]
+                            known  = [v for v in window if v is not None]
+                            _mg_roll12.append(sum(known) if len(known) == 12 else None)
+
+                        fig_mig = go.Figure()
+                        fig_mig.add_trace(go.Bar(
+                            x=_mg_periods, y=_mg_vest,
+                            name="Vestiging (in)",
+                            marker_color="rgba(44,160,44,0.55)",
+                            hovertemplate="%{x}: %{y:,}<extra>Vestiging</extra>",
+                        ))
+                        _mg_vert_neg = [-v if v is not None else None for v in _mg_vert]
+                        fig_mig.add_trace(go.Bar(
+                            x=_mg_periods, y=_mg_vert_neg,
+                            customdata=_mg_vert,
+                            name="Vertrek (uit)",
+                            marker_color="rgba(214,39,40,0.55)",
+                            hovertemplate="%{x}: %{customdata:,}<extra>Vertrek</extra>",
+                        ))
+                        fig_mig.add_trace(go.Scatter(
+                            x=_mg_periods, y=_mg_roll12,
+                            name="12m netto voortschrijdend",
+                            mode="lines",
+                            line=dict(color="#1f77b4", width=2, dash="dot"),
+                            yaxis="y2",
+                            hovertemplate="%{x}: %{y:+,}<extra>12m netto</extra>",
+                        ))
+                        fig_mig.update_layout(
+                            barmode="overlay",
+                            yaxis =dict(title="Personen / maand"),
+                            yaxis2=dict(
+                                title="12m netto instroom",
+                                overlaying="y", side="right",
+                                showgrid=False,
+                                zeroline=True, zerolinecolor="#aaa",
+                            ),
+                            xaxis =dict(title=""),
+                            height=280,
+                            margin=dict(l=10, r=10, t=10, b=10),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                            hovermode="x unified",
+                        )
+                        st.plotly_chart(fig_mig, use_container_width=True)
+                        st.caption(
+                            f"Binnenlandse vestiging & vertrek in {_gm_label}. "
+                            "Positief 12m netto = meer instroom dan uitstroom → verhoogt druk op woningmarkt. "
+                            "Bron: CBS 37230ned · NLOD"
+                        )
 
                 st.caption("Bron: CBS PBK 85819NED · 85773NED · 86054NED · Kadaster · NLOD")
             else:
@@ -998,6 +1149,231 @@ W_final = W_type × perceel_factor
 
     # ── tab 5: ruwe data ─────────────────────────────────────────────────────
     with tab_raw:
+        st.markdown("##### Databronnen")
+
+        # !! CLAUDE: when adding a new data source anywhere in the app, add a row
+        # !! here too. Required fields: see CLAUDE.md § "Databronnen table".
+        _SOURCES = [
+            {
+                "Bron":           "PDOK / Kadaster",
+                "Dataset":        "BAG Locatieserver v3.1",
+                "Tabel-ID":       "–",
+                "Beschrijving":   "Vrij-tekst adresopzoek; levert coördinaten, buurtcode, wijkcode, gemeentecode en perceel-ID.",
+                "Granulariteit":  "Adres",
+                "Perioden":       "Actueel",
+                "Tijdresolutie":  "Continu",
+                "Laatste update": "Continu",
+                "Licentie":       "CC0",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "PDOK / Kadaster",
+                "Dataset":        "BAG WFS v2.0",
+                "Tabel-ID":       "–",
+                "Beschrijving":   "Bouwkenmerken per verblijfsobject: oppervlakte, bouwjaar, gebruiksdoel, status.",
+                "Granulariteit":  "Adres / pand",
+                "Perioden":       "Actueel",
+                "Tijdresolutie":  "Continu",
+                "Laatste update": "Continu",
+                "Licentie":       "CC0",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "PDOK / Kadaster",
+                "Dataset":        "BRK Kadastralekaart WFS v5.0",
+                "Tabel-ID":       "–",
+                "Beschrijving":   "Kadastraal perceeloppervlak per perceel.",
+                "Granulariteit":  "Perceel",
+                "Perioden":       "Actueel",
+                "Tijdresolutie":  "Continu",
+                "Laatste update": "Continu",
+                "Licentie":       "CC0",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "Kadaster",
+                "Dataset":        "Landelijke Voorziening WOZ (LVWOZ)",
+                "Tabel-ID":       "–",
+                "Beschrijving":   "Officiële WOZ-waarden per adres per peildatum (1 jan). Limiet 5 000 req/dag.",
+                "Granulariteit":  "Adres",
+                "Perioden":       "Meerdere peildata",
+                "Tijdresolutie":  "Jaarlijks",
+                "Laatste update": "Peildatum 2025-01-01",
+                "Licentie":       "CC0",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "RVO",
+                "Dataset":        "EP-Online v4",
+                "Tabel-ID":       "–",
+                "Beschrijving":   "Energielabels (energieklasse, opnamedatum) per adres; meest recente certificaat.",
+                "Granulariteit":  "Adres",
+                "Perioden":       "Actueel",
+                "Tijdresolutie":  "Continu",
+                "Laatste update": "Continu",
+                "Licentie":       "CC0",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "CBS",
+                "Dataset":        "Kerncijfers Wijken en Buurten 2025",
+                "Tabel-ID":       "86165NED",
+                "Beschrijving":   "Demografische kenmerken, woningtypen, inkomen en gem. WOZ per buurt/wijk/gemeente. Ook gebruikt voor WOZ-trendgrafiek (2013–2025) via eerdere jaaredities.",
+                "Granulariteit":  "Buurt / wijk / gemeente",
+                "Perioden":       "2013–2025 (per jaarlijkse tabel)",
+                "Tijdresolutie":  "Jaarlijks (nieuwe tabel-ID per jaar)",
+                "Laatste update": "2026-03-31",
+                "Licentie":       "NLOD",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "CBS",
+                "Dataset":        "Prijsindex Bestaande Koopwoningen – COROP",
+                "Tabel-ID":       "85819NED",
+                "Beschrijving":   "Kwartaal prijsindex (2020=100), transactievolume en gemiddelde verkoopprijs per COROP-regio (40 regio's). Inclusief 95%-betrouwbaarheidsmarges.",
+                "Granulariteit":  "COROP (40 regio's)",
+                "Perioden":       "Q1 1995 – heden",
+                "Tijdresolutie":  "Kwartaal (~6 weken vertraging)",
+                "Laatste update": "Q1 2026",
+                "Licentie":       "NLOD",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "CBS",
+                "Dataset":        "Prijsindex Bestaande Koopwoningen – Nationaal",
+                "Tabel-ID":       "85773NED",
+                "Beschrijving":   "Nationale kwartaal prijsindex en transactievolume voor vergelijking met COROP-data.",
+                "Granulariteit":  "Nationaal",
+                "Perioden":       "Q1 1995 – heden",
+                "Tijdresolutie":  "Kwartaal",
+                "Laatste update": "Q1 2026",
+                "Licentie":       "NLOD",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "CBS",
+                "Dataset":        "Gebiedsindelingen – gemeente → COROP",
+                "Tabel-ID":       "84721NED",
+                "Beschrijving":   "Koppeling van gemeentecodes (GM) aan COROP-codes (CR). Gebruikt voor geografische aggregatie.",
+                "Granulariteit":  "Gemeente",
+                "Perioden":       "2024",
+                "Tijdresolutie":  "Jaarlijks",
+                "Laatste update": "2024",
+                "Licentie":       "NLOD",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "CBS",
+                "Dataset":        "Voorraad woningen; toevoegingen en onttrekkingen",
+                "Tabel-ID":       "86054NED",
+                "Beschrijving":   "Jaarlijkse nieuwbouw, sloop en netto mutaties in de woningvoorraad per gemeente en COROP.",
+                "Granulariteit":  "Gemeente / COROP / Provincie",
+                "Perioden":       "2020–2024",
+                "Tijdresolutie":  "Jaarlijks",
+                "Laatste update": "2024 (voorlopig)",
+                "Licentie":       "NLOD",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "CBS",
+                "Dataset":        "Nieuwbouw en transformaties; kenmerken woning",
+                "Tabel-ID":       "86084NED",
+                "Beschrijving":   "Jaarlijkse nieuwbouw per woningtype (tussenwoning, hoekwoning, 2-kap, vrijstaand, meergezins) per COROP.",
+                "Granulariteit":  "COROP",
+                "Perioden":       "2018–2024",
+                "Tijdresolutie":  "Jaarlijks",
+                "Laatste update": "2024 (voorlopig)",
+                "Licentie":       "NLOD",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "DUO",
+                "Dataset":        "Vestigingen PO + VO & Kwaliteitsoordelen",
+                "Tabel-ID":       "–",
+                "Beschrijving":   "Schoollocaties (BRIN, naam, postcode, gemeente) voor basisonderwijs en voortgezet onderwijs, aangevuld met inspectiebeoordelingen.",
+                "Granulariteit":  "School / vestiging",
+                "Perioden":       "Locaties: actueel · Oordelen: t/m 2018",
+                "Tijdresolutie":  "Jaarlijks (locaties); onregelmatig (oordelen)",
+                "Laatste update": "Oordelen: 2018-09-01",
+                "Licentie":       "CC0",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "OpenStreetMap",
+                "Dataset":        "Overpass API – onderwijsvoorzieningen",
+                "Tabel-ID":       "–",
+                "Beschrijving":   "Nabije scholen, kinderopvang, MBO en universiteiten binnen opgegeven straal via OSM-tags.",
+                "Granulariteit":  "Punt / vlak",
+                "Perioden":       "Actueel",
+                "Tijdresolutie":  "Continu (community)",
+                "Laatste update": "Continu",
+                "Licentie":       "ODbL",
+                "Commercieel":    "⚠️ Data: ja · Endpoint: niet voor productie",
+            },
+            {
+                "Bron":           "CBS",
+                "Dataset":        "Bouwvergunningen woonruimten; gemeente",
+                "Tabel-ID":       "83671NED",
+                "Beschrijving":   "Kwartaal aantal verleende bouwvergunningen voor woningen per gemeente (koop + huur, alle opdrachtgevers). Voorlopende indicator: ~12–18 maanden voor opleveringen.",
+                "Granulariteit":  "Gemeente",
+                "Perioden":       "Q1 2012 – heden",
+                "Tijdresolutie":  "Kwartaal",
+                "Laatste update": "Q4 2025 (voorlopig)",
+                "Licentie":       "NLOD",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "CBS",
+                "Dataset":        "Bevolkingsontwikkeling per gemeente per maand",
+                "Tabel-ID":       "37230ned",
+                "Beschrijving":   "Maandelijkse vestiging en vertrek van personen per gemeente, uitgesplitst naar binnenlandse verhuizingen en internationale migratie. Netto binnenlandse instroom = vraagzijde-indicator voor woningmarkt.",
+                "Granulariteit":  "Gemeente",
+                "Perioden":       "2002 – heden",
+                "Tijdresolutie":  "Maandelijks",
+                "Laatste update": "mei 2025 (voorlopig)",
+                "Licentie":       "NLOD",
+                "Commercieel":    "✅ Ja",
+            },
+            {
+                "Bron":           "Min. BZK / Leefbaarometer",
+                "Dataset":        "Leefbaarometer-scores buurten",
+                "Tabel-ID":       "–",
+                "Beschrijving":   "Leefbaarheidsscore en -klasse per buurt over de tijd.",
+                "Granulariteit":  "Buurt",
+                "Perioden":       "2002–2024",
+                "Tijdresolutie":  "~2-jaarlijks",
+                "Laatste update": "2024",
+                "Licentie":       "CC0",
+                "Commercieel":    "✅ Ja",
+            },
+        ]
+
+        df_sources = pd.DataFrame(_SOURCES)
+        st.dataframe(
+            df_sources,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Bron":           st.column_config.TextColumn("Bron",           width=140),
+                "Dataset":        st.column_config.TextColumn("Dataset",        width=220),
+                "Tabel-ID":       st.column_config.TextColumn("Tabel-ID",       width=90),
+                "Beschrijving":   st.column_config.TextColumn("Beschrijving",   width=340),
+                "Granulariteit":  st.column_config.TextColumn("Granulariteit",  width=160),
+                "Perioden":       st.column_config.TextColumn("Perioden",       width=140),
+                "Tijdresolutie":  st.column_config.TextColumn("Tijdresolutie",  width=170),
+                "Laatste update": st.column_config.TextColumn("Laatste update", width=130),
+                "Licentie":       st.column_config.TextColumn("Licentie",       width=70),
+                "Commercieel":    st.column_config.TextColumn("Commercieel",    width=200),
+            },
+        )
+        st.caption(
+            "CC0 = publiek domein. NLOD = Nationale Open Data Licentie (hergebruik incl. commercieel, met bronvermelding). "
+            "ODbL = Open Database License (idem, share-alike voor afgeleiden). "
+            "⚠️ = zie TODO voor openstaande actie."
+        )
+
+        st.markdown("---")
+        st.markdown("##### Ruwe API-responses")
         st.caption("Volledige API-responses voor alle bronnen.")
         for source, raw in data.raw.items():
             with st.expander(source):
