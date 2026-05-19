@@ -21,6 +21,12 @@ from watmoetikbieden.sources.leefbaarometer import LeefbarometerLookup
 
 _lbm = LeefbarometerLookup()
 
+
+def get_lbm_lookup() -> LeefbarometerLookup:
+    """Return the shared LeefbarometerLookup singleton (data loaded lazily)."""
+    return _lbm
+
+
 # Generous timeout: WFS and WOZ waardeloket can both be sluggish
 _TIMEOUT = httpx.Timeout(30.0)
 

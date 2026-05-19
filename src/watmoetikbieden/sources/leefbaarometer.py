@@ -267,6 +267,41 @@ class LeefbarometerLookup:
         _diag(f"buurtcode lookup: {bu_code} → {bu_naam}")
         return self._build_result(bu_code, bu_naam, "buurtcode")
 
+    def gemeente_history(self, gm_code_padded: str) -> list[dict]:
+        """
+        Return [{jaar, lbm, fys, onv, soc, vrz, won}, ...] with scores averaged
+        over all buurten in the gemeente.
+
+        Parameters
+        ----------
+        gm_code_padded  4-digit zero-padded gemeente code, e.g. '0796'.
+                        Buurten are matched by bu_code prefix 'BU{gm_code_padded}'.
+        """
+        self._ensure_loaded()
+        import pandas as pd
+
+        prefix = f"BU{gm_code_padded}"
+        gm_df  = self._df[self._df["bu_code"].str.startswith(prefix, na=False)]
+        if gm_df.empty:
+            _diag(f"gemeente_history: no buurten found for prefix {prefix}")
+            return []
+
+        available_cols = [c for c in _SCORE_COLS if c in gm_df.columns]
+        grouped = (
+            gm_df.groupby("jaar")[available_cols]
+            .mean(numeric_only=True)
+            .round(6)
+            .reset_index()
+        )
+
+        return [
+            {
+                "jaar": int(row["jaar"]),
+                **{col: _safe_float(row[col]) for col in available_cols},
+            }
+            for _, row in grouped.iterrows()
+        ]
+
     def lookup_by_coordinates(
         self, lat: float, lon: float
     ) -> LeefbarometerResult | None:

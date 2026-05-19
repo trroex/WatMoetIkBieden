@@ -640,17 +640,21 @@ def show_results(data, user_input: dict) -> None:
 
         # Buurt average WOZ series
         buurt_series: dict | None = None
+        gemeente_woz_series: dict | None = None
         if a and a.buurtcode:
-            with st.spinner("CBS gem. WOZ buurt ophalen…"):
+            with st.spinner("CBS gem. WOZ buurt & gemeente ophalen…"):
                 from watmoetikbieden.sources.cbs_woz_longitudinal import fetch_gem_woz_series
-                wijkcode = a.wijkcode or None
+                wijkcode    = a.wijkcode or None
                 gemeentecode = f"GM{a.gemeentecode}" if a.gemeentecode else None
                 buurt_series = fetch_gem_woz_series(a.buurtcode, wijkcode, gemeentecode)
+                # Fetch gemeente-level series separately for comparison
+                if gemeentecode:
+                    gemeente_woz_series = fetch_gem_woz_series(gemeentecode)
 
         # Lending capacity series
         lc_rows = lending_capacity_series()
 
-        if woz_pts or buurt_series or lc_rows:
+        if woz_pts or buurt_series or gemeente_woz_series or lc_rows:
             st.markdown("##### WOZ-waarde & maximale hypotheek bij modaal inkomen")
 
             fig_woz = go.Figure()
@@ -676,6 +680,18 @@ def show_results(data, user_input: dict) -> None:
                     line=dict(color="#ff7f0e", width=2, dash="dot"),
                     marker=dict(size=4),
                     hovertemplate="%{x}: € %{y:,.0f}<extra>Gem. WOZ buurt</extra>",
+                ))
+
+            if gemeente_woz_series:
+                gm_pts = sorted(gemeente_woz_series.items())
+                years_gm, vals_gm = zip(*gm_pts)
+                fig_woz.add_trace(go.Scatter(
+                    x=years_gm, y=vals_gm,
+                    mode="lines+markers",
+                    name="Gem. WOZ gemeente",
+                    line=dict(color="#9467bd", width=1.5, dash="dash"),
+                    marker=dict(size=4),
+                    hovertemplate="%{x}: € %{y:,.0f}<extra>Gem. WOZ gemeente</extra>",
                 ))
 
             if lc_rows:
@@ -918,6 +934,7 @@ W_final = W_type × perceel_factor
 
                 if lbm.lbm_history:
                     import plotly.graph_objects as go
+                    from watmoetikbieden.fetcher import get_lbm_lookup
 
                     _DIM_LABELS = {
                         "lbm": "Totaal leefbaarheid",
@@ -928,6 +945,21 @@ W_final = W_type × perceel_factor
                         "won": "Woningen",
                     }
                     national_means = lbm.national_means_2024
+
+                    # Gemeente average history (mean across all buurten in the gemeente)
+                    _gm_history: list[dict] = []
+                    if a and a.gemeentecode:
+                        try:
+                            _gm_history = get_lbm_lookup().gemeente_history(a.gemeentecode)
+                        except Exception:
+                            _gm_history = []
+                    _gm_hist_map: dict[str, dict[int, float]] = {}
+                    for row in _gm_history:
+                        for dim in _DIM_LABELS:
+                            if row.get(dim) is not None:
+                                _gm_hist_map.setdefault(dim, {})[int(row["jaar"])] = row[dim]
+
+                    _gm_label_lbm = a.gemeentenaam or a.gemeentecode if a else "Gemeente"
 
                     st.markdown("**Historiek per dimensie**")
                     dims = list(_DIM_LABELS.keys())
@@ -956,7 +988,21 @@ W_final = W_type × perceel_factor
                                     name="Buurt",
                                     line=dict(color="#1f77b4", width=2),
                                     marker=dict(size=5),
+                                    hovertemplate="%{x}: %{y:.3f}<extra>Buurt</extra>",
                                 ))
+
+                                # Gemeente average overlay
+                                gm_dim = _gm_hist_map.get(dim, {})
+                                if gm_dim:
+                                    gm_yrs = sorted(gm_dim.keys())
+                                    gm_vals = [gm_dim[y] for y in gm_yrs]
+                                    fig.add_trace(go.Scatter(
+                                        x=gm_yrs, y=gm_vals,
+                                        mode="lines",
+                                        name=f"Gem. {_gm_label_lbm}",
+                                        line=dict(color="#ff7f0e", width=1.5, dash="dot"),
+                                        hovertemplate="%{x}: %{y:.3f}<extra>Gemeente gem.</extra>",
+                                    ))
 
                                 nat = national_means.get(dim)
                                 if nat is not None:
@@ -976,7 +1022,12 @@ W_final = W_type × perceel_factor
                                     ),
                                     height=220,
                                     margin=dict(l=10, r=10, t=35, b=10),
-                                    showlegend=False,
+                                    showlegend=bool(gm_dim),
+                                    legend=dict(
+                                        orientation="h", yanchor="bottom",
+                                        y=1.02, xanchor="left", x=0,
+                                        font=dict(size=10),
+                                    ),
                                     xaxis=dict(tickformat="d"),
                                     yaxis=dict(autorange=True),
                                 )
