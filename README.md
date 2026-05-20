@@ -10,13 +10,13 @@ python -m venv .venv
 .\.venv\Scripts\pip install -e .
 
 # 3. Fetch data for an address
-.\.venv\Scripts\fetch-address "Keizersgracht 123, 1015 CJ Amsterdam"
+.\.venv\Scripts\fetch-address "Ambachtsweg 72, 5272 RW Sint-Michielsgestel"
 ```
 
 Or use the convenience script without installing:
 
 ```powershell
-.\.venv\Scripts\python scripts\fetch_address.py "Keizersgracht 123, 1015 CJ Amsterdam"
+.\.venv\Scripts\python scripts\fetch_address.py "Ambachtsweg 72, 5272 RW Sint-Michielsgestel"
 ```
 
 ## Data sources
